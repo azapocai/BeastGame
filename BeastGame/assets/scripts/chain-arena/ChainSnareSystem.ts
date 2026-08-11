@@ -27,14 +27,16 @@ export interface MovableTetherBody {
 /**
  * Gameplay facade around the continuous circle-contact solver.
  *
- * The contact arc is the single source of truth for presentation, route
- * length, tension and wrapping progress. There is no separate visual loop or
- * threshold-time topology change.
+ * The contact route is the source of truth for presentation, length and
+ * tension. Its geometry separately exposes total visible contact, added
+ * winding and player-caused orbit so design thresholds stay readable.
  */
 export class ChainSnareSystem {
   private static readonly CHAIN_CONTACT_PADDING = 2;
-  /** Actual additional body arc required to trip: 135 degrees. */
+  /** Additional body arc required for the stable fully-wrapped state: 135 degrees. */
   private static readonly WRAP_THRESHOLD = Math.PI * 0.75;
+  /** Full-tension pull-through begins once the rope has turned around the body by 45 degrees. */
+  private static readonly PULL_THROUGH_THRESHOLD = Math.PI * 0.25;
   private static readonly SNARE_DURATION = 1.2;
   private static readonly MAX_CONTACTS = 1;
 
@@ -93,12 +95,29 @@ export class ChainSnareSystem {
     return contact ? ChainContactSolver.windingArc(contact.geometry) : 0;
   }
 
+  /** Full visible rope-on-body arc; unlike progress it includes capture baseline. */
+  get totalContactAngle(): number {
+    const contact = this.contacts[0];
+    return contact ? ChainContactSolver.contactArc(contact.geometry) : 0;
+  }
+
+  /** Real angular displacement produced by player movement after the contact was created. */
+  get playerOrbitAngle(): number {
+    const contact = this.contacts[0];
+    return contact ? ChainContactSolver.playerOrbitArc(contact.geometry) : 0;
+  }
+
   get contactCount(): number {
     return this.contacts.length;
   }
 
   get securedCount(): number {
     return this.contacts.filter((contact) => this.isWrapped(contact)).length;
+  }
+
+  get pullThroughReady(): boolean {
+    const contact = this.contacts[0];
+    return contact ? this.canPullThrough(contact) : false;
   }
 
   get lastPullForce(): number {
@@ -185,9 +204,10 @@ export class ChainSnareSystem {
     const contact = this.contacts[0];
     if (contact) {
       const wrapped = this.isWrapped(contact);
+      const pullThroughReady = this.canPullThrough(contact);
       const routeGrowing = routeLength > previousRouteLength + 0.05;
       const crossedTensionLimit = previousPullForce < 1 && this.pullForce >= 1;
-      if (wrapped && this.pullForce >= 1 && (routeGrowing || crossedTensionLimit)) {
+      if (pullThroughReady && this.pullForce >= 1 && (routeGrowing || crossedTensionLimit)) {
         this.pendingAutoStun = contact;
       }
       contact.wasWrapped = wrapped;
@@ -476,5 +496,12 @@ export class ChainSnareSystem {
 
   private isWrapped(contact: BodyContact): boolean {
     return ChainContactSolver.windingArc(contact.geometry) >= ChainSnareSystem.WRAP_THRESHOLD - 0.001;
+  }
+
+  private canPullThrough(contact: BodyContact): boolean {
+    return ChainContactSolver.contactArc(contact.geometry)
+      >= ChainSnareSystem.PULL_THROUGH_THRESHOLD - 0.001
+      && ChainContactSolver.playerOrbitArc(contact.geometry)
+        >= ChainSnareSystem.PULL_THROUGH_THRESHOLD - 0.001;
   }
 }

@@ -42,12 +42,15 @@ const {
   EnemyState, PlayerState, ROOM_DEFINITIONS, TEST_ARENA_DAMAGE_ENABLED,
 } = loadModule(path.join(sourceRoot, 'ArenaModel.ts'));
 const { IronBallTether } = loadModule(path.join(sourceRoot, 'TetherSystem.ts'));
+const { CircleCollisionSolver } = loadModule(path.join(sourceRoot, 'CircleCollisionSolver.ts'));
 
 function testArenaConfigurationTest() {
   assert(ROOM_DEFINITIONS.length === 1, 'test build should expose one room only');
   const room = ROOM_DEFINITIONS[0];
   assert(room.mechanic === 'iron-ball', 'test room should use the iron-ball tether');
-  assert(room.enemies.length === 1, 'test room should contain one enemy only');
+  assert(room.enemies.length === 2, 'test room should contain a release-handoff target');
+  assert(Math.abs(room.enemies[1].y - room.enemies[0].y) > 18,
+    'second enemy should start outside the initial straight-chain collision radius');
   assert(room.barrels.length === 0, 'test room should not contain barrels');
   const enemy = new EnemyState(room.enemies[0]);
   assert(Math.abs(enemy.speed - 100 * 2 / 3) < 1e-6, 'enemy speed should be two thirds of baseline');
@@ -111,6 +114,16 @@ function ironBallSolidCollisionTest() {
   assert(Math.hypot(playerCollisionTether.x - player.x, playerCollisionTether.y - player.y)
       >= playerCollisionTether.radius + player.radius - 1e-6,
   'iron ball should be separated from the player without moving the player');
+}
+
+function enemyPeerCollisionTest() {
+  const first = new EnemyState({ x: 0, y: 0 });
+  const second = new EnemyState({ x: 0, y: 0 });
+  assert(CircleCollisionSolver.separatePair(first, second), 'overlapping enemies should produce a peer collision');
+  assert(Math.hypot(first.x - second.x, first.y - second.y) >= first.radius + second.radius - 1e-6,
+    'peer collision should separate both enemies to their combined radii');
+  assert(Math.abs(first.x) > 0 && Math.abs(second.x) > 0,
+    'peer collision should distribute separation between both enemies');
 }
 
 function enemyAttackAndCollisionSwitchTest() {
@@ -317,6 +330,8 @@ function collisionCorrectionDoesNotAddWrapTest() {
   player.y = Math.sin(correctedAngle) * 80;
   system.update(0.016, snapshot(player, anchor, 500), player, [enemy], { x: 0, y: 0 });
   assert(system.progress === 0, 'externally corrected player position must not create wrap progress');
+  assert(system.playerOrbitAngle === 0,
+    'externally corrected player position must not create player-caused orbit progress');
 }
 
 function briefBrushCannotSecureTest() {
@@ -338,6 +353,35 @@ function briefBrushCannotSecureTest() {
   system.enforceRoutedLength(snapshot(player, anchor, 500, 1), player, anchor);
   assert(system.securedCount === 0, 'a short 34-degree brush should not secure the chain');
   assert(enemy.snareTimer === 0, 'a short brush at full tension must not stun the enemy');
+}
+
+function partialWrapFullTensionPullThroughTest() {
+  const system = new ChainSnareSystem();
+  const player = new PlayerState();
+  player.x = -80;
+  player.y = 0;
+  const anchor = { x: 100, y: 0 };
+  const enemy = new EnemyState({ x: 0, y: 0 });
+  system.update(0.016, snapshot(player, anchor, 500), player, [enemy]);
+  const start = { x: player.x, y: player.y };
+  const angle = Math.PI + 0.82; // Player actually circles the body by ~47°.
+  player.x = Math.cos(angle) * 80;
+  player.y = Math.sin(angle) * 80;
+  system.update(0.05, snapshot(player, anchor, 500, 1), player, [enemy], {
+    x: player.x - start.x,
+    y: player.y - start.y,
+  });
+  assert(system.progress > 0.34 && system.progress < 0.36,
+    'legacy added-arc progress should remain near the old 35% reading');
+  assert(system.playerOrbitAngle > 0.81 && system.playerOrbitAngle < 0.83,
+    'player orbit should retain the real 47-degree movement independently of tangent baseline');
+  assert(system.totalContactAngle > system.windingAngle + 0.2,
+    'total visible contact should include the baseline that old progress intentionally omitted');
+  assert(system.pullThroughReady, 'a 47-degree player orbit with enough visible contact should arm pull-through');
+  assert(system.contactCount === 1, 'auto pull-through should wait for routed constraint resolution');
+  system.enforceRoutedLength(snapshot(player, anchor, 500, 1), player, anchor);
+  assert(system.contactCount === 0 && enemy.snareTimer > 0,
+    'a 45-degree-plus contact at full tension should pull through and stun');
 }
 
 function separatedEmptyContactReleasesTest() {
@@ -475,9 +519,9 @@ function createWrappedFixture() {
     player.x = Math.cos(angle) * 80;
     player.y = Math.sin(angle) * 80;
     system.update(0.05, snapshot(player, anchor, 500), player, [enemy]);
-    if (system.securedCount === 1) break;
+    if (system.windingAngle >= Math.PI * 0.75) break;
   }
-  assert(system.securedCount === 1, 'orbit should secure the body contact');
+  assert(system.windingAngle >= Math.PI * 0.75, 'orbit should accumulate a full 135-degree added wrap');
   assert(system.state === 'wrapped', 'secured contact should enter wrapped state');
   return { system, player, enemy, anchor };
 }
@@ -586,6 +630,7 @@ function releasePathTransfersIntoNewContactTest() {
 testArenaConfigurationTest();
 liveIronBallTestArenaContactTest();
 ironBallSolidCollisionTest();
+enemyPeerCollisionTest();
 enemyAttackAndCollisionSwitchTest();
 stableBodyContactTest();
 shortestInitialRouteAndFreeOrbitDirectionTest();
@@ -596,6 +641,7 @@ fullTurnTopologyAndReverseTest();
 releaseTransitionTravelsTowardPlayerTest();
 collisionCorrectionDoesNotAddWrapTest();
 briefBrushCannotSecureTest();
+partialWrapFullTensionPullThroughTest();
 separatedEmptyContactReleasesTest();
 manualDetachUsesReleasePassThroughTest();
 completeRouteAndLengthBudgetTest();

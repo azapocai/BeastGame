@@ -46,4 +46,32 @@ export class CircleCollisionSolver {
     }
     return { normalX, normalY, penetration };
   }
+
+  /** Symmetric separation for peers such as two ordinary enemies. */
+  static separatePair(
+    first: MovableCircle,
+    second: MovableCircle,
+    fallbackNormal = { x: 1, y: 0 },
+  ): CircleCollisionResult | null {
+    const dx = first.x - second.x;
+    const dy = first.y - second.y;
+    const distance = Math.hypot(dx, dy);
+    const minimum = first.radius + second.radius;
+    if (distance >= minimum) return null;
+
+    const fallbackLength = Math.hypot(fallbackNormal.x, fallbackNormal.y);
+    const normalX = distance > 0.001
+      ? dx / distance
+      : fallbackLength > 0.001 ? fallbackNormal.x / fallbackLength : 1;
+    const normalY = distance > 0.001
+      ? dy / distance
+      : fallbackLength > 0.001 ? fallbackNormal.y / fallbackLength : 0;
+    const penetration = minimum - distance;
+    const correction = penetration * 0.5;
+    first.x += normalX * correction;
+    first.y += normalY * correction;
+    second.x -= normalX * correction;
+    second.y -= normalY * correction;
+    return { normalX, normalY, penetration };
+  }
 }

@@ -33,8 +33,12 @@ export interface ContinuousCircleContact {
   sideLocked: boolean;
   entryAngle: number;
   exitAngle: number;
+  /** Baseline arc needed to route the chain around the body at capture time. */
   initialArc: number;
+  /** Full signed chain-on-body arc, used for visual/readable contact angle. */
   sweep: number;
+  /** Signed angular displacement caused by player movement since capture. */
+  playerOrbitSweep: number;
 }
 
 interface SolvedContact {
@@ -77,6 +81,7 @@ export class ChainContactSolver {
       exitAngle: solved.exitAngle,
       initialArc: Math.abs(solved.sweep),
       sweep: solved.sweep,
+      playerOrbitSweep: 0,
     };
   }
 
@@ -93,6 +98,7 @@ export class ChainContactSolver {
     playerMotion: Point2D | null,
   ): boolean {
     const radius = body.radius + padding;
+    this.advancePlayerOrbit(contact, player, body, playerMotion);
     if (!contact.sideLocked) {
       const motionDirection = this.playerAngularDirection(player, playerMotion, body);
       if (motionDirection !== 0) {
@@ -136,6 +142,16 @@ export class ChainContactSolver {
     return Math.max(0, Math.abs(contact.sweep) - contact.initialArc);
   }
 
+  /** Total rope arc visibly routed around the body, including capture baseline. */
+  static contactArc(contact: ContinuousCircleContact): number {
+    return Math.abs(contact.sweep);
+  }
+
+  /** Player-caused angular displacement after contact creation, excluding body motion. */
+  static playerOrbitArc(contact: ContinuousCircleContact): number {
+    return Math.abs(contact.playerOrbitSweep);
+  }
+
   static findPathIntersection(
     points: Point2D[],
     body: CircleBody,
@@ -164,6 +180,27 @@ export class ChainContactSolver {
     const delta = this.shortestAngle(previousAngle, currentAngle);
     if (Math.abs(delta) <= ChainContactSolver.MOTION_EPSILON) return 0;
     return delta > 0 ? 1 : -1;
+  }
+
+  private static advancePlayerOrbit(
+    contact: ContinuousCircleContact,
+    player: Point2D,
+    body: CircleBody,
+    motion: Point2D | null,
+  ): void {
+    if (!motion || Math.hypot(motion.x, motion.y) <= ChainContactSolver.MOTION_EPSILON) return;
+    const previousX = player.x - motion.x - body.x;
+    const previousY = player.y - motion.y - body.y;
+    const currentX = player.x - body.x;
+    const currentY = player.y - body.y;
+    const minimumRadius = body.radius + 0.001;
+    if (Math.hypot(previousX, previousY) <= minimumRadius
+      || Math.hypot(currentX, currentY) <= minimumRadius) return;
+    const delta = this.shortestAngle(
+      Math.atan2(previousY, previousX),
+      Math.atan2(currentY, currentX),
+    );
+    if (Math.abs(delta) > ChainContactSolver.MOTION_EPSILON) contact.playerOrbitSweep += delta;
   }
 
   private static solve(

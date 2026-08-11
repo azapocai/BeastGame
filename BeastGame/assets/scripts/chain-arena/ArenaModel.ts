@@ -37,6 +37,9 @@ export const ROOM_DEFINITIONS: RoomDefinition[] = [
     enemies: [
       // Spawn on the initial player-to-ball segment so each run starts with a direct wrapping case.
       { x: -54, y: -58 },
+      // Outside the initial straight segment, but close enough to the first
+      // body's upper release arc to test active-path contact handoff.
+      { x: -54, y: -25 },
     ],
     barrels: [],
   },

@@ -5,6 +5,7 @@ import {
   BarrelState, Bounds, EnemyState, MELEE_ATTACK_RANGE, PlayerState, ROOM_DEFINITIONS,
 } from './ArenaModel';
 import { InputRouter } from './InputRouter';
+import { CircleCollisionSolver } from './CircleCollisionSolver';
 import { Math2D } from './Math2D';
 import { IronBallTether, TurntableTether } from './TetherSystem';
 import { TetherRenderer } from './TetherRenderer';
@@ -153,9 +154,9 @@ export class ChainArenaController extends Component {
     for (const enemy of this.enemies) if (!enemy.dead) enemy.update(dt, this.player, this.enemies, BOUNDS);
     if (this.ironBall) {
       this.ironBall.applyHits(this.enemies, this.barrels, this.explodeBarrel.bind(this));
-      this.ironBall.resolveBodyCollisions(this.player, this.enemies, BOUNDS);
     }
     if (this.turntable) this.turntable.applyHits(this.enemies, this.barrels, this.explodeBarrel.bind(this));
+    this.resolveSolidBodyCollisions();
 
     const tetherSnapshot = this.ironBall
       ? this.ironBall.getSnapshot(this.player)
@@ -240,6 +241,33 @@ export class ChainArenaController extends Component {
       const direction = distance > 0.001 ? { x: dx / distance, y: dy / distance } : { x: 1, y: 0 };
       this.player.x = enemy.x + direction.x * minimum;
       this.player.y = enemy.y + direction.y * minimum;
+    }
+  }
+
+  /** Resolves peer bodies after AI motion and before the chain reads their positions. */
+  private resolveSolidBodyCollisions(): void {
+    // A ball can push one enemy into another. Two short passes settle that
+    // interaction without introducing a general-purpose physics simulation.
+    for (let iteration = 0; iteration < 2; iteration += 1) {
+      if (this.ironBall) this.ironBall.resolveBodyCollisions(this.player, this.enemies, BOUNDS);
+      this.resolveEnemyEnemyCollisions();
+    }
+  }
+
+  private resolveEnemyEnemyCollisions(): void {
+    for (let firstIndex = 0; firstIndex < this.enemies.length - 1; firstIndex += 1) {
+      const first = this.enemies[firstIndex];
+      if (first.dead || !first.collisionEnabled) continue;
+      for (let secondIndex = firstIndex + 1; secondIndex < this.enemies.length; secondIndex += 1) {
+        const second = this.enemies[secondIndex];
+        if (second.dead || !second.collisionEnabled) continue;
+        const fallback = (firstIndex + secondIndex) % 2 === 0 ? { x: 1, y: 0 } : { x: 0, y: 1 };
+        if (!CircleCollisionSolver.separatePair(first, second, fallback)) continue;
+        first.x = Math2D.clamp(first.x, BOUNDS.left + first.radius, BOUNDS.right - first.radius);
+        first.y = Math2D.clamp(first.y, BOUNDS.bottom + first.radius, BOUNDS.top - first.radius);
+        second.x = Math2D.clamp(second.x, BOUNDS.left + second.radius, BOUNDS.right - second.radius);
+        second.y = Math2D.clamp(second.y, BOUNDS.bottom + second.radius, BOUNDS.top - second.radius);
+      }
     }
   }
 
@@ -427,9 +455,12 @@ export class ChainArenaController extends Component {
     else this.status.string = '近战命中敌人两次即可击杀';
     if (this.snare.activeCount > 0) this.status.string += ` · 绊倒 ${this.snare.activeCount}`;
     if (this.snare.contactCount > 0) {
+      const contactAngles = `绕体 ${Math.round(this.snare.totalContactAngle * 180 / Math.PI)}° · 绕行 ${Math.round(this.snare.playerOrbitAngle * 180 / Math.PI)}°`;
       const state = this.snare.securedCount > 0
-        ? '已绕住 · 张力 100% 或按 C 可绊倒'
-        : `缠绕 ${Math.round(this.snare.progress * 100)}% · ${this.snare.directionHint} · 按 C 强制绊倒`;
+        ? `${contactAngles} · 已绕住 · 张力 100% 或按 C 可绊倒`
+        : this.snare.pullThroughReady
+          ? `${contactAngles} · 张力 100% 可拉脱`
+          : `${contactAngles} · ${this.snare.directionHint} · 按 C 强制绊倒`;
       this.status.string += ` · ${state} · 拉力 ${Math.round(this.snare.lastPullForce * 100)}%`;
     }
     if (this.player.fallTimer > 0) this.status.string += ` · 摔倒 ${this.player.fallTimer.toFixed(1)} 秒`;
