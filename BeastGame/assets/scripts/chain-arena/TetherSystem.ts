@@ -33,7 +33,7 @@ export class IronBallTether implements TetherAnchorProvider {
   vx = 0;
   vy = 0;
   radius = 27;
-  maxLength = 296;
+  maxLength = 396;
   lastSpeed = 0;
   tension = 0;
   hitPulse = 0;
@@ -58,7 +58,8 @@ export class IronBallTether implements TetherAnchorProvider {
     };
   }
 
-  update(dt: number, player: PlayerState, bounds: Bounds): void {
+  /** Integrates only the iron ball. It never writes the player position. */
+  integrate(dt: number, bounds: Bounds): void {
     this.hitPulse = Math.max(0, this.hitPulse - dt);
     const drag = Math.pow(0.32, dt);
     this.vx *= drag;
@@ -66,6 +67,20 @@ export class IronBallTether implements TetherAnchorProvider {
     this.x += this.vx * dt;
     this.y += this.vy * dt;
 
+    if (this.x < bounds.left + this.radius || this.x > bounds.right - this.radius) {
+      this.x = Math2D.clamp(this.x, bounds.left + this.radius, bounds.right - this.radius);
+      this.vx *= -0.48;
+    }
+    if (this.y < bounds.bottom + this.radius || this.y > bounds.top - this.radius) {
+      this.y = Math2D.clamp(this.y, bounds.bottom + this.radius, bounds.top - this.radius);
+      this.vy *= -0.48;
+    }
+    this.lastSpeed = Math.hypot(this.vx, this.vy);
+  }
+
+  /** Legacy coupled entry point retained for non-refactored callers. */
+  update(dt: number, player: PlayerState, bounds: Bounds): void {
+    this.integrate(dt, bounds);
     let dx = player.x - this.x;
     let dy = player.y - this.y;
     let distance = Math.hypot(dx, dy);
@@ -84,15 +99,6 @@ export class IronBallTether implements TetherAnchorProvider {
       this.vy += ny * (outwardVelocity * 0.82 + excess * 90) * dt;
     }
 
-    if (this.x < bounds.left + this.radius || this.x > bounds.right - this.radius) {
-      this.x = Math2D.clamp(this.x, bounds.left + this.radius, bounds.right - this.radius);
-      this.vx *= -0.48;
-    }
-    if (this.y < bounds.bottom + this.radius || this.y > bounds.top - this.radius) {
-      this.y = Math2D.clamp(this.y, bounds.bottom + this.radius, bounds.top - this.radius);
-      this.vy *= -0.48;
-    }
-
     dx = player.x - this.x;
     dy = player.y - this.y;
     distance = Math.hypot(dx, dy);
@@ -102,7 +108,6 @@ export class IronBallTether implements TetherAnchorProvider {
       player.x = this.x + nx * this.maxLength;
       player.y = this.y + ny * this.maxLength;
     }
-    this.lastSpeed = Math.hypot(this.vx, this.vy);
   }
 
   applyHits(enemies: EnemyState[], barrels: BarrelState[], explodeBarrel: (barrel: BarrelState) => void): void {

@@ -1,4 +1,5 @@
 import { Math2D, Point2D } from './Math2D';
+import { ChainPerformanceBudget } from './ChainPerformanceBudget';
 
 export interface Bounds {
   left: number;
@@ -40,10 +41,19 @@ export const ROOM_DEFINITIONS: RoomDefinition[] = [
       // Outside the initial straight segment, but close enough to the first
       // body's upper release arc to test active-path contact handoff.
       { x: -54, y: -25 },
+      // A third target outside the direct tether, reserved for ordered
+      // multi-contact and middle-contact removal tests.
+      { x: -12, y: 18 },
     ],
     barrels: [],
   },
 ];
+
+for (const room of ROOM_DEFINITIONS) {
+  if (room.enemies.length > ChainPerformanceBudget.maxActiveEnemies) {
+    throw new Error(`Room ${room.name} exceeds the ${ChainPerformanceBudget.maxActiveEnemies}-enemy budget`);
+  }
+}
 
 const TEST_ARENA_SPEED_SCALE = 2 / 3;
 export const TEST_ARENA_DAMAGE_ENABLED = false;
@@ -67,7 +77,12 @@ export class PlayerState {
   hitFlash = 0;
   fallTimer = 0;
 
-  update(dt: number, move: Point2D, aim: Point2D, dashRequested: boolean, bounds: Bounds): void {
+  /**
+   * Advances action timers and returns the requested displacement without
+   * committing a world position. Chain rooms pass this proposal to the one
+   * authoritative motion resolver.
+   */
+  prepareMotion(dt: number, move: Point2D, aim: Point2D, dashRequested: boolean): Point2D {
     this.attackCooldown = Math.max(0, this.attackCooldown - dt);
     this.attackFlash = Math.max(0, this.attackFlash - dt);
     this.dashCooldown = Math.max(0, this.dashCooldown - dt);
@@ -80,7 +95,7 @@ export class PlayerState {
     if (this.fallTimer > 0) {
       this.vx = 0;
       this.vy = 0;
-      return;
+      return { x: 0, y: 0 };
     }
 
     if (dashRequested && this.dashCooldown <= 0) {
@@ -95,8 +110,14 @@ export class PlayerState {
     const speed = (this.dashTimer > 0 ? 590 : 238) * TEST_ARENA_SPEED_SCALE;
     this.vx = moving.x * speed;
     this.vy = moving.y * speed;
-    this.x = Math2D.clamp(this.x + this.vx * dt, bounds.left + this.radius, bounds.right - this.radius);
-    this.y = Math2D.clamp(this.y + this.vy * dt, bounds.bottom + this.radius, bounds.top - this.radius);
+    return { x: this.vx * dt, y: this.vy * dt };
+  }
+
+  /** Legacy one-body entry point used by rooms without a motion resolver. */
+  update(dt: number, move: Point2D, aim: Point2D, dashRequested: boolean, bounds: Bounds): void {
+    const motion = this.prepareMotion(dt, move, aim, dashRequested);
+    this.x = Math2D.clamp(this.x + motion.x, bounds.left + this.radius, bounds.right - this.radius);
+    this.y = Math2D.clamp(this.y + motion.y, bounds.bottom + this.radius, bounds.top - this.radius);
   }
 
   tryAttack(): boolean {

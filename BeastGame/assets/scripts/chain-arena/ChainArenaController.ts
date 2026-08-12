@@ -9,7 +9,9 @@ import { CircleCollisionSolver } from './CircleCollisionSolver';
 import { Math2D } from './Math2D';
 import { IronBallTether, TurntableTether } from './TetherSystem';
 import { TetherRenderer } from './TetherRenderer';
-import { ChainSnareSystem } from './ChainSnareSystem';
+import { SpriteChainRenderer } from './SpriteChainRenderer';
+import { ChainSimulation } from './ChainSimulation';
+import { ArenaMotionResolver } from './ArenaMotionResolver';
 
 const { ccclass } = _decorator;
 
@@ -29,6 +31,9 @@ const BOUNDS: Bounds = { left: -446, right: 446, bottom: -258, top: 258 };
 @ccclass('ChainArenaController')
 export class ChainArenaController extends Component {
   private graphics!: Graphics;
+  private staticRenderer!: Node;
+  private staticGraphics!: Graphics;
+  private spriteChain!: SpriteChainRenderer;
   private hud!: Label;
   private status!: Label;
   private help!: Label;
@@ -40,7 +45,8 @@ export class ChainArenaController extends Component {
   private barrels: BarrelState[] = [];
   private ironBall: IronBallTether | null = null;
   private turntable: TurntableTether | null = null;
-  private snare = new ChainSnareSystem();
+  private chain = new ChainSimulation();
+  private motionResolver = new ArenaMotionResolver();
   private effects: ExplosionEffect[] = [];
   private state: 'playing' | 'transition' | 'lost' | 'won' = 'playing';
   private stateTimer = 0;
@@ -55,6 +61,8 @@ export class ChainArenaController extends Component {
 
   protected onDestroy(): void {
     this.input.disable();
+    this.spriteChain?.destroy();
+    if (this.staticRenderer?.isValid) this.staticRenderer.destroy();
   }
 
   protected update(deltaTime: number): void {
@@ -76,6 +84,16 @@ export class ChainArenaController extends Component {
   }
 
   private createVisuals(): void {
+    this.staticRenderer = new Node('ArenaStaticRenderer');
+    this.staticRenderer.setParent(this.node);
+    this.staticRenderer.layer = Layers.Enum.UI_2D;
+    const staticTransform = this.staticRenderer.addComponent(UITransform);
+    staticTransform.setContentSize(LOGICAL_WIDTH, LOGICAL_HEIGHT);
+    staticTransform.setAnchorPoint(0.5, 0.5);
+    this.staticGraphics = this.staticRenderer.addComponent(Graphics);
+    this.drawArena(this.staticGraphics, 0, 0);
+    this.spriteChain = new SpriteChainRenderer(this.node);
+
     const renderer = new Node('ArenaRenderer');
     renderer.setParent(this.node);
     renderer.layer = Layers.Enum.UI_2D;
@@ -83,6 +101,7 @@ export class ChainArenaController extends Component {
     transform.setContentSize(LOGICAL_WIDTH, LOGICAL_HEIGHT);
     transform.setAnchorPoint(0.5, 0.5);
     this.graphics = renderer.addComponent(Graphics);
+    this.spriteChain.placeAround(renderer);
 
     this.hud = this.createLabel('Hud', new Vec2(-430, 265), 18, new Color(247, 233, 205));
     this.status = this.createLabel('Status', new Vec2(0, 265), 18, new Color(255, 208, 111), true);
@@ -122,7 +141,7 @@ export class ChainArenaController extends Component {
     this.barrels = room.barrels.map((definition) => new BarrelState(definition));
     this.ironBall = room.mechanic === 'iron-ball' ? new IronBallTether(this.player) : null;
     this.turntable = room.mechanic === 'turntable' ? new TurntableTether(0, 0) : null;
-    this.snare.reset();
+    this.chain.reset();
     this.effects = [];
     this.state = 'playing';
     this.stateTimer = 0;
@@ -131,45 +150,52 @@ export class ChainArenaController extends Component {
   private updatePlaying(dt: number, attackRequested: boolean, dashRequested: boolean, pullRequested: boolean): void {
     const move = this.input.getMove();
     const aim = this.input.getAim(this.player);
-    const playerFrameStartX = this.player.x;
-    const playerFrameStartY = this.player.y;
-    this.player.update(dt, move, aim, dashRequested, BOUNDS);
-
+    const previousInfluencer = this.chain.influencingEnemy;
+    const influencerStartX = previousInfluencer?.x || 0;
+    const influencerStartY = previousInfluencer?.y || 0;
+    let desiredPlayerMotion = { x: 0, y: 0 };
     if (this.ironBall) {
-      this.ironBall.update(dt, this.player, BOUNDS);
-      this.player.x = Math2D.clamp(this.player.x, BOUNDS.left + this.player.radius, BOUNDS.right - this.player.radius);
-      this.player.y = Math2D.clamp(this.player.y, BOUNDS.bottom + this.player.radius, BOUNDS.top - this.player.radius);
+      desiredPlayerMotion = this.player.prepareMotion(dt, move, aim, dashRequested);
+      this.ironBall.integrate(dt, BOUNDS);
+    } else {
+      this.player.update(dt, move, aim, dashRequested, BOUNDS);
     }
     if (this.turntable) {
       this.turntable.update(dt, this.player);
       this.player.x = Math2D.clamp(this.player.x, BOUNDS.left + this.player.radius, BOUNDS.right - this.player.radius);
       this.player.y = Math2D.clamp(this.player.y, BOUNDS.bottom + this.player.radius, BOUNDS.top - this.player.radius);
     }
-    const snarePlayerMotion = {
-      x: this.player.x - playerFrameStartX,
-      y: this.player.y - playerFrameStartY,
-    };
-
     if (attackRequested && this.player.tryAttack()) this.resolvePlayerAttack();
     for (const enemy of this.enemies) if (!enemy.dead) enemy.update(dt, this.player, this.enemies, BOUNDS);
     if (this.ironBall) {
       this.ironBall.applyHits(this.enemies, this.barrels, this.explodeBarrel.bind(this));
+      this.motionResolver.resolveIronBallFrame(
+        this.player,
+        this.ironBall,
+        this.enemies,
+        BOUNDS,
+        desiredPlayerMotion,
+      );
+      if (previousInfluencer) {
+        this.motionResolver.applyTaggedTetherInfluence(
+          this.player,
+          this.ironBall,
+          previousInfluencer,
+          { x: previousInfluencer.x - influencerStartX, y: previousInfluencer.y - influencerStartY },
+          BOUNDS,
+        );
+      }
     }
     if (this.turntable) this.turntable.applyHits(this.enemies, this.barrels, this.explodeBarrel.bind(this));
-    this.resolveSolidBodyCollisions();
+    for (let iteration = 0; iteration < 2; iteration += 1) this.resolveEnemyEnemyCollisions();
 
-    const tetherSnapshot = this.ironBall
-      ? this.ironBall.getSnapshot(this.player)
-      : this.turntable
-        ? this.turntable.getSnapshot(this.player)
-        : null;
-    this.snare.update(dt, tetherSnapshot, this.player, this.enemies, snarePlayerMotion);
-    if (pullRequested) this.snare.triggerManualPull();
-    if (tetherSnapshot && this.snare.enforceRoutedLength(tetherSnapshot, this.player, this.ironBall)) {
-      this.player.x = Math2D.clamp(this.player.x, BOUNDS.left + this.player.radius, BOUNDS.right - this.player.radius);
-      this.player.y = Math2D.clamp(this.player.y, BOUNDS.bottom + this.player.radius, BOUNDS.top - this.player.radius);
+    if (this.ironBall) {
+      this.chain.update(dt, this.ironBall, this.player, this.enemies, this.ironBall.maxLength);
+    } else if (this.turntable) {
+      const anchor = this.turntable.getAnchorPosition();
+      this.chain.update(dt, anchor, this.player, this.enemies, this.turntable.maxLength);
     }
-    this.resolvePlayerEnemyCollisions();
+    if (pullRequested) this.chain.triggerManualPull();
 
     if (this.player.health <= 0) {
       this.state = 'lost';
@@ -230,30 +256,6 @@ export class ChainArenaController extends Component {
     }
   }
 
-  private resolvePlayerEnemyCollisions(): void {
-    for (const enemy of this.enemies) {
-      if (!enemy.collisionEnabled) continue;
-      const dx = this.player.x - enemy.x;
-      const dy = this.player.y - enemy.y;
-      const distance = Math.hypot(dx, dy);
-      const minimum = this.player.radius + enemy.radius;
-      if (distance >= minimum) continue;
-      const direction = distance > 0.001 ? { x: dx / distance, y: dy / distance } : { x: 1, y: 0 };
-      this.player.x = enemy.x + direction.x * minimum;
-      this.player.y = enemy.y + direction.y * minimum;
-    }
-  }
-
-  /** Resolves peer bodies after AI motion and before the chain reads their positions. */
-  private resolveSolidBodyCollisions(): void {
-    // A ball can push one enemy into another. Two short passes settle that
-    // interaction without introducing a general-purpose physics simulation.
-    for (let iteration = 0; iteration < 2; iteration += 1) {
-      if (this.ironBall) this.ironBall.resolveBodyCollisions(this.player, this.enemies, BOUNDS);
-      this.resolveEnemyEnemyCollisions();
-    }
-  }
-
   private resolveEnemyEnemyCollisions(): void {
     for (let firstIndex = 0; firstIndex < this.enemies.length - 1; firstIndex += 1) {
       const first = this.enemies[firstIndex];
@@ -276,18 +278,23 @@ export class ChainArenaController extends Component {
     g.clear();
     const shakeX = this.shake ? (Math.random() - 0.5) * this.shake : 0;
     const shakeY = this.shake ? (Math.random() - 0.5) * this.shake : 0;
-    this.drawArena(g, shakeX, shakeY);
+    this.staticRenderer.setPosition(shakeX, shakeY, 0);
     if (this.turntable) TetherRenderer.drawTurntable(g, this.turntable, shakeX, shakeY);
     if (this.ironBall) {
-      const snapshot = this.ironBall.getSnapshot(this.player);
-      TetherRenderer.drawChain(g, this.snare.getVisualSnapshot(snapshot), shakeX, shakeY);
+      const links = this.spriteChain.render(this.chain.getRouteSnapshot(), shakeX, shakeY);
+      this.chain.setVisibleLinkCount(links);
+      if (links === 0) TetherRenderer.drawChainSnapshot(g, this.chain.getRouteSnapshot(), shakeX, shakeY);
     }
     if (this.turntable) {
-      const snapshot = this.turntable.getSnapshot(this.player);
-      TetherRenderer.drawChain(g, this.snare.getVisualSnapshot(snapshot), shakeX, shakeY);
+      const links = this.spriteChain.render(this.chain.getRouteSnapshot(), shakeX, shakeY);
+      this.chain.setVisibleLinkCount(links);
+      if (links === 0) TetherRenderer.drawChainSnapshot(g, this.chain.getRouteSnapshot(), shakeX, shakeY);
     }
     for (const barrel of this.barrels) this.drawBarrel(g, barrel, shakeX, shakeY);
     for (const enemy of this.enemies) if (!enemy.dead) this.drawEnemy(g, enemy, shakeX, shakeY);
+    if (!this.spriteChain.ready) {
+      TetherRenderer.drawContactForeground(g, this.chain.getRouteSnapshot(), shakeX, shakeY);
+    }
     for (const enemy of this.enemies) if (!enemy.dead && enemy.snareTimer > 0) TetherRenderer.drawSnare(g, enemy, shakeX, shakeY);
     this.drawPlayer(g, shakeX, shakeY);
     if (this.ironBall) TetherRenderer.drawIronBall(g, this.ironBall, shakeX, shakeY);
@@ -453,15 +460,16 @@ export class ChainArenaController extends Component {
       this.status.string = `杆端速度 ${Math.round(this.turntable.lastAnchorSpeed)} · 张力 ${Math.round(this.turntable.tension * 100)}%`;
     }
     else this.status.string = '近战命中敌人两次即可击杀';
-    if (this.snare.activeCount > 0) this.status.string += ` · 绊倒 ${this.snare.activeCount}`;
-    if (this.snare.contactCount > 0) {
-      const contactAngles = `绕体 ${Math.round(this.snare.totalContactAngle * 180 / Math.PI)}° · 绕行 ${Math.round(this.snare.playerOrbitAngle * 180 / Math.PI)}°`;
-      const state = this.snare.securedCount > 0
+    if (this.chain.activeCount > 0) this.status.string += ` · 绊倒 ${this.chain.activeCount}`;
+    if (this.chain.enclosedCount > 0) this.status.string += ` · 圈内候选 ${this.chain.enclosedCount}`;
+    if (this.chain.contactCount > 0) {
+      const contactAngles = `局部绕角 ${Math.round(this.chain.totalContactAngle * 180 / Math.PI)}°`;
+      const state = this.chain.securedCount > 0
         ? `${contactAngles} · 已绕住 · 张力 100% 或按 C 可绊倒`
-        : this.snare.pullThroughReady
+        : this.chain.pullThroughReady
           ? `${contactAngles} · 张力 100% 可拉脱`
-          : `${contactAngles} · ${this.snare.directionHint} · 按 C 强制绊倒`;
-      this.status.string += ` · ${state} · 拉力 ${Math.round(this.snare.lastPullForce * 100)}%`;
+          : `${contactAngles} · ${this.chain.directionHint} · 按 C 强制绊倒`;
+      this.status.string += ` · ${state} · 拉力 ${Math.round(this.chain.lastPullForce * 100)}%`;
     }
     if (this.player.fallTimer > 0) this.status.string += ` · 摔倒 ${this.player.fallTimer.toFixed(1)} 秒`;
     if (this.debugTether && (this.ironBall || this.turntable)) this.status.string += ' · 锁链调试 ON';

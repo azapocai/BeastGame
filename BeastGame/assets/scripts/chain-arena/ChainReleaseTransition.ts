@@ -83,7 +83,9 @@ export class ChainReleaseTransition {
 
   build(livePoints: Point2D[], targetPoints: Point2D[] = livePoints): Point2D[] {
     if (!this.active || livePoints.length < 2) {
-      return targetPoints.map((point) => ({ x: point.x, y: point.y }));
+      // Callers treat the authoritative target route as read-only. Returning it
+      // directly avoids a stable-state allocation every render and physics pass.
+      return targetPoints as Point2D[];
     }
     const liveStart = livePoints[0];
     const liveEnd = livePoints[livePoints.length - 1];

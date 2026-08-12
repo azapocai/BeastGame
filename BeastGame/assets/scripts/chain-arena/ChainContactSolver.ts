@@ -121,6 +121,54 @@ export class ChainContactSolver {
     return this.windingArc(contact) > ChainContactSolver.RELEASE_EPSILON || directlyTouching;
   }
 
+  /**
+   * Advances the player-side endpoint while keeping the currently bound route
+   * exit. Multi-contact paths use this instead of temporarily solving against
+   * the global anchor, which would manufacture winding before the local
+   * body-to-body tangent is rebound.
+   */
+  static updatePlayerEndpoint(
+    contact: ContinuousCircleContact,
+    player: Point2D,
+    downstream: Point2D,
+    body: CircleBody,
+    padding: number,
+    playerMotion: Point2D | null,
+  ): boolean {
+    const radius = body.radius + padding;
+    this.advancePlayerOrbit(contact, player, body, playerMotion);
+    if (!contact.sideLocked) {
+      const motionDirection = this.playerAngularDirection(player, playerMotion, body);
+      if (motionDirection !== 0) {
+        const previousPlayer = playerMotion
+          ? { x: player.x - playerMotion.x, y: player.y - playerMotion.y }
+          : player;
+        contact.side = motionDirection > 0 ? -1 : 1;
+        contact.sideLocked = true;
+        const previousEntry = this.unwrapNear(
+          this.tangentAngle(previousPlayer, body, radius, contact.side),
+          contact.entryAngle,
+        );
+        const baseline = this.directedSweep(previousEntry, contact.exitAngle, contact.side);
+        contact.entryAngle = previousEntry;
+        contact.initialArc = Math.abs(baseline);
+        contact.sweep = baseline;
+        contact.exitAngle = previousEntry + baseline;
+      }
+    }
+
+    const entry = this.unwrapNear(
+      this.tangentAngle(player, body, radius, contact.side),
+      contact.entryAngle,
+    );
+    contact.sweep = contact.exitAngle - entry;
+    contact.entryAngle = entry;
+    if (!contact.sideLocked) contact.initialArc = Math.abs(contact.sweep);
+    const directlyTouching = this.segmentIntersectsCircle(player, downstream, body, radius);
+    if (!contact.sideLocked) return directlyTouching;
+    return this.windingArc(contact) > ChainContactSolver.RELEASE_EPSILON || directlyTouching;
+  }
+
   /** Re-solves tangencies while preserving the currently selected topology. */
   static refresh(
     contact: ContinuousCircleContact,
@@ -150,6 +198,68 @@ export class ChainContactSolver {
   /** Player-caused angular displacement after contact creation, excluding body motion. */
   static playerOrbitArc(contact: ContinuousCircleContact): number {
     return Math.abs(contact.playerOrbitSweep);
+  }
+
+  /**
+   * Records player-authored winding for a contact whose physical entry/exit
+   * points are owned by the persistent guide rather than by the player itself.
+   */
+  static advanceGuideWinding(
+    contact: ContinuousCircleContact,
+    player: Point2D,
+    body: CircleBody,
+    playerMotion: Point2D | null,
+  ): void {
+    if (!playerMotion) return;
+    const motionLength = Math.hypot(playerMotion.x, playerMotion.y);
+    if (motionLength <= this.MOTION_EPSILON) return;
+    const previousX = player.x - playerMotion.x - body.x;
+    const previousY = player.y - playerMotion.y - body.y;
+    const currentX = player.x - body.x;
+    const currentY = player.y - body.y;
+    const minimumRadius = body.radius + 0.001;
+    if (Math.hypot(previousX, previousY) <= minimumRadius
+      || Math.hypot(currentX, currentY) <= minimumRadius) return;
+    const delta = this.shortestAngle(
+      Math.atan2(previousY, previousX),
+      Math.atan2(currentY, currentX),
+    );
+    if (Math.abs(delta) <= this.MOTION_EPSILON) return;
+    const observedMoveX = currentX - previousX;
+    const observedMoveY = currentY - previousY;
+    if (Math.hypot(observedMoveX - playerMotion.x, observedMoveY - playerMotion.y) > 0.5) return;
+    if (!contact.sideLocked) {
+      contact.side = delta > 0 ? -1 : 1;
+      contact.sideLocked = true;
+    }
+    contact.playerOrbitSweep += delta;
+    const magnitude = contact.initialArc + Math.abs(contact.playerOrbitSweep);
+    contact.sweep = contact.side * magnitude;
+    contact.exitAngle = contact.entryAngle + contact.sweep;
+  }
+
+  /** Tangent angle on a circle for an endpoint and a chosen travel side. */
+  static tangentAngleForSide(point: Point2D, body: CircleBody, radius: number, side: 1 | -1): number {
+    return this.tangentAngle(point, body, radius, side);
+  }
+
+  /**
+   * Rebinds a persistent contact to new physical tangent endpoints while
+   * preserving the extra winding accumulated after capture.
+   */
+  static rebindRouteTangents(
+    contact: ContinuousCircleContact,
+    entryAngle: number,
+    exitAngle: number,
+  ): void {
+    const winding = this.windingArc(contact);
+    const entry = this.unwrapNear(entryAngle, contact.entryAngle);
+    const baseSweep = this.directedSweep(entryAngle, exitAngle, contact.side);
+    const magnitude = Math.abs(baseSweep) + winding;
+    contact.entryAngle = entry;
+    contact.initialArc = Math.abs(baseSweep);
+    contact.sweep = contact.side * magnitude;
+    contact.exitAngle = entry + contact.sweep;
   }
 
   static findPathIntersection(
