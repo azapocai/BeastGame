@@ -562,13 +562,16 @@ export class ChainArenaController extends Component {
     if (this.chain.activeCount > 0) statusText += ` · 绊倒 ${this.chain.activeCount}`;
     if (this.chain.enclosedCount > 0) statusText += ` · 圈内候选 ${this.chain.enclosedCount}`;
     if (this.chain.contactCount > 0) {
-      const contactAngles = `局部绕角 ${Math.round(this.chain.totalContactAngle * 180 / Math.PI)}°`;
-      const state = this.chain.securedCount > 0
-        ? `${contactAngles} · 已绕住 · 张力 100% 或按 C 可绊倒`
-        : this.chain.pullThroughReady
-          ? `${contactAngles} · 张力 100% 可拉脱`
-          : `${contactAngles} · ${this.chain.directionHint} · 按 C 强制绊倒`;
-      statusText += ` · ${state} · 拉力 ${Math.round(this.chain.lastPullForce * 100)}%`;
+      const qualification = this.chain.primaryReleaseQualification;
+      const contactAngle = Math.round((qualification?.contactAngle || 0) * 180 / Math.PI);
+      const playerOrbit = Math.round((qualification?.playerOrbit || 0) * 180 / Math.PI);
+      let releaseState = '沿链条收紧';
+      if (qualification?.blockReason === 'orbit') releaseState = '需要主动同向绕行';
+      else if (qualification?.blockReason === 'tension') releaseState = '已绕住 · 继续拉满张力';
+      else if (qualification?.blockReason === 'ready') releaseState = '可以滑脱';
+      statusText += ` · 局部绕角 ${contactAngle}° · 玩家绕行 ${playerOrbit}°`
+        + ` · ${releaseState} · 拉力 ${Math.round(this.chain.lastPullForce * 100)}%`
+        + ' · 按 C 强制绊倒';
     }
     if (this.player.fallTimer > 0) statusText += ` · 摔倒 ${this.player.fallTimer.toFixed(1)} 秒`;
     if (this.debugTether && (this.ironBall || this.turntable)) statusText += ' · 锁链调试 ON';

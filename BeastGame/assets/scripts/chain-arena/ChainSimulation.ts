@@ -3,7 +3,11 @@ import { ChainPerformanceBudget } from './ChainPerformanceBudget';
 import { ChainRouteSnapshot, RouteContactRange } from './ChainRouteSnapshot';
 import { ChainSweepBounds, ChainSweepHitDetector } from './ChainSweepHitDetector';
 import { ChainEnclosureTracker } from './ChainEnclosureTracker';
-import { ChainContactIntentTracker } from './ChainContactIntentTracker';
+import {
+  ChainReleaseQualification,
+  updateChainReleaseQualification,
+} from './ChainReleaseQualification';
+import { ChainWrapIntentTracker } from './ChainWrapIntentTracker';
 import { Math2D, Point2D } from './Math2D';
 
 interface ChainNode extends Point2D {
@@ -41,7 +45,9 @@ export class ChainSimulation {
   private readonly publishRanges: RouteContactRange[] = [];
   private readonly cumulativeLengths: number[] = [];
   private readonly enclosureTracker = new ChainEnclosureTracker();
-  private readonly contactIntentTracker = new ChainContactIntentTracker();
+  private readonly wrapIntentTracker = new ChainWrapIntentTracker();
+  private readonly releaseQualifications: ChainReleaseQualification[] = [];
+  private readonly releaseQualificationPool: ChainReleaseQualification[] = [];
   private readonly sweepStartNodes: Point2D[] = [];
   private readonly releaseTargetNodes: Point2D[] = [];
   private readonly sweepSegmentBounds: ChainSweepBounds[] = [];
@@ -69,14 +75,6 @@ export class ChainSimulation {
   private collisionNarrowPhaseChecks = 0;
 
   get contactCount(): number { return this.contacts.length; }
-  get securedCount(): number {
-    let count = 0;
-    for (const contact of this.contacts) {
-      if (contact.angle >= ChainSimulation.STUN_ANGLE
-        && this.contactIntentTracker.hasPlayerWrapIntent(contact.enemy)) count += 1;
-    }
-    return count;
-  }
   get enclosedCount(): number { return this.enclosedTargets; }
   get activeCount(): number {
     let count = 0;
@@ -85,13 +83,8 @@ export class ChainSimulation {
   }
   get totalContactAngle(): number { return this.evaluatedContactAngle; }
   get lastPullForce(): number { return this.tension; }
-  get directionHint(): string { return this.contacts.length > 0 ? '沿链条收紧' : ''; }
-  get pullThroughReady(): boolean {
-    for (const contact of this.contacts) {
-      if (contact.angle >= ChainSimulation.STUN_ANGLE
-        && this.contactIntentTracker.hasPlayerWrapIntent(contact.enemy)) return true;
-    }
-    return false;
+  get primaryReleaseQualification(): Readonly<ChainReleaseQualification> | null {
+    return this.releaseQualifications[0] || null;
   }
   get lastCollisionNarrowPhaseChecks(): number { return this.collisionNarrowPhaseChecks; }
   get occupiedLength(): number {
@@ -111,7 +104,8 @@ export class ChainSimulation {
     this.nodes.length = 0;
     this.contacts.length = 0;
     this.enclosureTracker.reset();
-    this.contactIntentTracker.reset();
+    this.wrapIntentTracker.reset();
+    this.releaseQualifications.length = 0;
     this.releaseCandidates.length = 0;
     this.releaseHitTargets.clear();
     this.stunnedTargets.clear();
@@ -157,6 +151,7 @@ export class ChainSimulation {
     this.evaluatedContactAngle = this.contacts[0]?.angle || 0;
     this.measureTension();
     if (this.updateTautFreeChainStraightening(dt, start, end)) this.measureTension();
+    this.rebuildReleaseQualifications();
     this.updateStuns();
     this.publish();
     for (const enemy of this.stunnedTargets) {
@@ -351,7 +346,7 @@ export class ChainSimulation {
   ): void {
     this.contacts.length = 0;
     this.enclosureTracker.beginFrame();
-    this.contactIntentTracker.beginFrame();
+    this.wrapIntentTracker.beginFrame();
     this.enclosedTargets = 0;
     const limit = Math.min(enemies.length, ChainPerformanceBudget.maxActiveEnemies);
     for (let enemyIndex = 0; enemyIndex < limit; enemyIndex += 1) {
@@ -400,7 +395,7 @@ export class ChainSimulation {
         contact.signedSweep = bestSweep;
         this.contactPool[contactIndex] = contact;
         this.contacts.push(contact);
-        this.contactIntentTracker.observe(enemy, player, playerDrivenMotion, contact.signedSweep);
+        this.wrapIntentTracker.observe(enemy, player, playerDrivenMotion, contact.signedSweep);
       }
       // Enclosure is independent from a shallow body brush. A target inside
       // the guide loop remains an enclosure candidate even when it also has a
@@ -409,7 +404,7 @@ export class ChainSimulation {
       if (this.pointInsideGuide(enemy.x, enemy.y)) this.enclosureTracker.observeInside(enemy);
     }
     this.enclosureTracker.endFrame();
-    this.contactIntentTracker.endFrame();
+    this.wrapIntentTracker.endFrame(player);
     this.enclosedTargets = this.enclosureTracker.candidates.length;
     this.contacts.sort((a, b) => a.startNode - b.startNode);
     if (this.contacts.length > ChainPerformanceBudget.maxContacts) {
@@ -417,13 +412,41 @@ export class ChainSimulation {
     }
   }
 
+  private rebuildReleaseQualifications(): void {
+    this.releaseQualifications.length = this.contacts.length;
+    for (let index = 0; index < this.contacts.length; index += 1) {
+      const contact = this.contacts[index];
+      const qualification = this.releaseQualificationPool[index] || {
+        enemy: contact.enemy,
+        contactAngle: 0,
+        playerOrbit: 0,
+        tension: 0,
+        contactReady: false,
+        angleReady: false,
+        orbitReady: false,
+        tensionReady: false,
+        canRelease: false,
+        blockReason: 'angle',
+      };
+      updateChainReleaseQualification(
+        qualification,
+        contact.enemy,
+        contact.angle,
+        this.wrapIntentTracker.getPlayerOrbit(contact.enemy, contact.signedSweep),
+        this.tension,
+        ChainSimulation.STUN_ANGLE,
+        ChainWrapIntentTracker.MIN_PLAYER_ORBIT,
+      );
+      this.releaseQualificationPool[index] = qualification;
+      this.releaseQualifications[index] = qualification;
+    }
+  }
+
   private updateStuns(): void {
-    if (this.tension < CHAIN_FULL_TENSION) return;
     let triggered = false;
-    for (const contact of this.contacts) {
-      if (contact.angle < ChainSimulation.STUN_ANGLE) continue;
-      if (!this.contactIntentTracker.hasPlayerWrapIntent(contact.enemy)) continue;
-      this.stun(contact.enemy);
+    for (const qualification of this.releaseQualifications) {
+      if (!qualification.canRelease) continue;
+      this.stun(qualification.enemy);
       triggered = true;
     }
     if (triggered) {
@@ -434,12 +457,15 @@ export class ChainSimulation {
       for (const enemy of this.enclosureTracker.candidates) this.stun(enemy);
     }
     let retained = 0;
-    for (const contact of this.contacts) {
+    for (let index = 0; index < this.contacts.length; index += 1) {
+      const contact = this.contacts[index];
       if (contact.enemy.snareTimer > 0) continue;
       this.contacts[retained] = contact;
+      this.releaseQualifications[retained] = this.releaseQualifications[index];
       retained += 1;
     }
     this.contacts.length = retained;
+    this.releaseQualifications.length = retained;
   }
 
   private stun(enemy: EnemyState): void {

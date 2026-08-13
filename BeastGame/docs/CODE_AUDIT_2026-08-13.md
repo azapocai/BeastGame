@@ -10,14 +10,15 @@
 
 ## 现行代码：保留
 
-以下 19 个脚本属于当前运行或直接依赖：
+以下 20 个脚本属于当前运行或直接依赖：
 
 - `GameBootstrap.ts`：场景入口。
 - `ChainArenaController.ts`：当前 Demo 编排与占位表现。
 - `ArenaModel.ts`：玩家、敌人、房间和测试数据。
 - `ArenaMotionResolver.ts`：铁球房玩家位置的唯一提交者。
 - `ChainSimulation.ts`：唯一链条几何、碰撞、接触、张力和眩晕权威。
-- `ChainContactIntentTracker.ts`：有方向的玩家主动缠绕证据。
+- `ChainWrapIntentTracker.ts`：玩家驱动的相对净绕行、反向抵消和短暂接触容错。
+- `ChainReleaseQualification.ts`：自动滑脱与 HUD 共用的权威资格快照。
 - `ChainEnclosureTracker.ts`：稳定圈内候选。
 - `ChainSweepHitDetector.ts`：回直过程连续扫掠命中。
 - `ChainRouteSnapshot.ts`：玩法与渲染共享的只读发布路径。

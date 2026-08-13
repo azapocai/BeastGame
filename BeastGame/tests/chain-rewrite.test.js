@@ -79,7 +79,7 @@ function bruteSweepHit(previous, current, circle, padding = 0) {
 
 const { ArenaMotionResolver } = loadModule(path.join(sourceRoot, 'ArenaMotionResolver.ts'));
 const { ChainSimulation } = loadModule(path.join(sourceRoot, 'ChainSimulation.ts'));
-const { ChainContactIntentTracker } = loadModule(path.join(sourceRoot, 'ChainContactIntentTracker.ts'));
+const { ChainWrapIntentTracker } = loadModule(path.join(sourceRoot, 'ChainWrapIntentTracker.ts'));
 const { ChainVisualDynamics } = loadModule(path.join(sourceRoot, 'ChainVisualDynamics.ts'));
 const { ChainRouteSnapshot } = loadModule(path.join(sourceRoot, 'ChainRouteSnapshot.ts'));
 const { ChainSweepHitDetector } = loadModule(path.join(sourceRoot, 'ChainSweepHitDetector.ts'));
@@ -144,128 +144,148 @@ function collisionCorrectionIsNotPlayerWrapIntentTest() {
 }
 
 function sameDirectionTranslationIsNotPlayerWrapIntentTest() {
-  const tracker = new ChainContactIntentTracker();
+  const tracker = new ChainWrapIntentTracker();
   const enemy = new EnemyState({ x: 0, y: 0 });
   const player = { x: 100, y: 20 };
   tracker.beginFrame();
   tracker.observe(enemy, player, { x: 0, y: 0 }, -0.2);
-  tracker.endFrame();
+  tracker.endFrame(player);
   for (let frame = 0; frame < 60; frame += 1) {
     enemy.x += 2;
     player.x += 2;
     tracker.beginFrame();
     tracker.observe(enemy, player, { x: 2, y: 0 }, -0.2);
-    tracker.endFrame();
+    tracker.endFrame(player);
   }
-  assert(!tracker.hasPlayerWrapIntent(enemy),
+  assert(!tracker.hasPlayerWrapIntent(enemy, -0.2),
     'equal same-direction player/enemy translation must not accumulate relative wrap intent');
 }
 
-function relativeAngleWithoutDeeperWrapIsNotIntentTest() {
-  const tracker = new ChainContactIntentTracker();
+function enemyMotionCannotCreatePlayerWrapIntentTest() {
+  const tracker = new ChainWrapIntentTracker();
   const enemy = new EnemyState({ x: 0, y: 0 });
   const player = { x: 100, y: 0 };
   tracker.beginFrame();
-  tracker.observe(enemy, player, { x: 0, y: 0 }, Math.PI * 0.45);
-  tracker.endFrame();
-  for (let frame = 1; frame <= 30; frame += 1) {
+  tracker.observe(enemy, player, { x: 0, y: 0 }, -0.2);
+  tracker.endFrame(player);
+  for (let frame = 0; frame < 30; frame += 1) {
+    const angle = -(frame + 1) * Math.PI / 180;
+    enemy.x = player.x - Math.cos(angle) * 100;
+    enemy.y = player.y - Math.sin(angle) * 100;
+    tracker.beginFrame();
+    tracker.observe(enemy, player, { x: 0, y: 0 }, -0.4);
+    tracker.endFrame(player);
+  }
+  assert(!tracker.hasPlayerWrapIntent(enemy, -0.4),
+    'enemy motion around a stationary player must not create player-authored orbit');
+}
+
+function playerRelativeOrbitCreatesAndReverseMotionRemovesIntentTest() {
+  const tracker = new ChainWrapIntentTracker();
+  const enemy = new EnemyState({ x: 0, y: 0 });
+  const player = { x: 100, y: 0 };
+  tracker.beginFrame();
+  tracker.observe(enemy, player, { x: 0, y: 0 }, -0.4);
+  tracker.endFrame(player);
+  for (let degree = 1; degree <= 52; degree += 1) {
     const previousX = player.x;
     const previousY = player.y;
-    const angle = frame * Math.PI / 180;
+    const angle = -degree * Math.PI / 180;
     player.x = Math.cos(angle) * 100;
     player.y = Math.sin(angle) * 100;
     tracker.beginFrame();
-    tracker.observe(
-      enemy,
-      player,
-      { x: player.x - previousX, y: player.y - previousY },
-      Math.PI * 0.45,
-    );
-    tracker.endFrame();
+    tracker.observe(enemy, player, {
+      x: player.x - previousX,
+      y: player.y - previousY,
+    }, -0.4);
+    tracker.endFrame(player);
   }
-  assert(!tracker.hasPlayerWrapIntent(enemy),
-    'relative player angle without a simultaneously deepening real body wrap must not create release intent');
-}
-
-function straightPassWithDeepeningWrapIsNotIntentTest() {
-  const tracker = new ChainContactIntentTracker();
-  const enemy = new EnemyState({ x: 0, y: 0 });
-  const player = { x: 5, y: 30 };
-  tracker.beginFrame();
-  tracker.observe(enemy, player, { x: 2, y: 0 }, Math.PI * 0.25);
-  tracker.endFrame();
-  for (let frame = 1; frame <= 40; frame += 1) {
-    player.x += 2;
-    tracker.beginFrame();
-    tracker.observe(enemy, player, { x: 2, y: 0 }, Math.PI * (0.25 + frame * 0.01));
-    tracker.endFrame();
-  }
-  assert(!tracker.hasPlayerWrapIntent(enemy),
-    'a straight pass near an enemy must not count as orbit even when polar angle and body bend both increase');
-}
-
-function enemyDeepeningWrapWithoutPlayerOrbitIsNotIntentTest() {
-  const tracker = new ChainContactIntentTracker();
-  const enemy = new EnemyState({ x: 0, y: 0 });
-  const player = { x: 100, y: 0 };
-  tracker.beginFrame();
-  tracker.observe(enemy, player, { x: 0, y: 0 }, Math.PI * 0.2);
-  tracker.endFrame();
-  for (let frame = 1; frame <= 30; frame += 1) {
-    tracker.beginFrame();
-    tracker.observe(enemy, player, { x: 0, y: 0 }, Math.PI * (0.2 + frame * 0.01));
-    tracker.endFrame();
-  }
-  assert(!tracker.hasPlayerWrapIntent(enemy),
-    'a deepening PBD/enemy-driven bend without player orbit must not create release intent');
-}
-
-function openingWrapCancelsStoredPlayerIntentTest() {
-  const chain = new ChainSimulation();
-  const tracker = chain.contactIntentTracker;
-  const enemy = new EnemyState({ x: 0, y: 0 });
-  const player = { x: 100, y: 0 };
-  tracker.beginFrame();
-  tracker.observe(enemy, player, { x: 0, y: 0 }, Math.PI * 0.6);
-  tracker.endFrame();
-
-  for (let degree = 1; degree <= 18; degree += 1) {
+  assert(tracker.hasPlayerWrapIntent(enemy, -0.4),
+    'real player-authored relative orbit must create wrap intent');
+  for (let degree = 51; degree >= 0; degree -= 1) {
     const previousX = player.x;
     const previousY = player.y;
-    const orbit = Math.PI * (degree / 180);
-    player.x = Math.cos(orbit) * 100;
-    player.y = Math.sin(orbit) * 100;
+    const angle = -degree * Math.PI / 180;
+    player.x = Math.cos(angle) * 100;
+    player.y = Math.sin(angle) * 100;
     tracker.beginFrame();
-    tracker.observe(
-      enemy,
-      player,
-      { x: player.x - previousX, y: player.y - previousY },
-      Math.PI * (0.6 + degree / 180),
-    );
-    tracker.endFrame();
+    tracker.observe(enemy, player, {
+      x: player.x - previousX,
+      y: player.y - previousY,
+    }, -0.4);
+    tracker.endFrame(player);
   }
-  assert(tracker.hasPlayerWrapIntent(enemy), 'fixture must first accumulate valid player wrap intent');
+  assert(!tracker.hasPlayerWrapIntent(enemy, -0.4),
+    'player reverse motion must unwind its prior net orbit evidence');
+}
 
-  for (let frame = 0; frame < 12; frame += 1) {
-    enemy.x += 2;
-    player.x += 2;
+function oneFrameContactGapPreservesButLongGapClearsIntentTest() {
+  const tracker = new ChainWrapIntentTracker();
+  const enemy = new EnemyState({ x: 0, y: 0 });
+  const player = { x: 100, y: 0 };
+  tracker.beginFrame();
+  tracker.observe(enemy, player, { x: 0, y: 0 }, -0.4);
+  tracker.endFrame(player);
+  for (let degree = 1; degree <= 52; degree += 1) {
+    const previousX = player.x;
+    const previousY = player.y;
+    const angle = -degree * Math.PI / 180;
+    player.x = Math.cos(angle) * 100;
+    player.y = Math.sin(angle) * 100;
     tracker.beginFrame();
-    tracker.observe(enemy, player, { x: 2, y: 0 }, Math.PI * (0.6 - (frame + 1) * 0.025));
-    tracker.endFrame();
+    tracker.observe(enemy, player, {
+      x: player.x - previousX,
+      y: player.y - previousY,
+    }, -0.4);
+    tracker.endFrame(player);
   }
-  assert(!tracker.hasPlayerWrapIntent(enemy),
-    'an opening body wrap during same-direction travel must revoke stale automatic-release intent');
-  chain.contacts.push({
-    enemy,
-    startNode: 4,
-    endNode: 8,
-    angle: Math.PI * 0.45,
-    signedSweep: Math.PI * 0.45,
-  });
-  chain.tension = 1;
-  chain.updateStuns();
-  assert(enemy.snareTimer === 0,
-    'full tension plus a remaining 81-degree bend must not auto-release after its old intent was revoked');
+  assert(tracker.hasPlayerWrapIntent(enemy, -0.4), 'fixture must establish player orbit');
+  tracker.beginFrame();
+  tracker.endFrame(player);
+  tracker.beginFrame();
+  tracker.observe(enemy, player, { x: 0, y: 0 }, -0.4);
+  tracker.endFrame(player);
+  assert(tracker.hasPlayerWrapIntent(enemy, -0.4),
+    'one missed contact publication must preserve valid player orbit evidence');
+  for (let frame = 0; frame < 3; frame += 1) {
+    tracker.beginFrame();
+    tracker.endFrame(player);
+  }
+  assert(!tracker.hasPlayerWrapIntent(enemy, -0.4),
+    'contact absence beyond the fixed grace period must clear old orbit evidence');
+}
+
+function multiEnemyWrapStateRemainsIndependentAfterRemovalTest() {
+  const tracker = new ChainWrapIntentTracker();
+  const removed = new EnemyState({ x: 0, y: 0 });
+  const retained = new EnemyState({ x: 0, y: 0 });
+  const newcomer = new EnemyState({ x: 0, y: 0 });
+  const player = { x: 100, y: 0 };
+  tracker.beginFrame();
+  tracker.observe(removed, player, { x: 0, y: 0 }, -0.4);
+  tracker.observe(retained, player, { x: 0, y: 0 }, -0.4);
+  tracker.endFrame(player);
+  for (let degree = 1; degree <= 52; degree += 1) {
+    const previousX = player.x;
+    const previousY = player.y;
+    const angle = -degree * Math.PI / 180;
+    player.x = Math.cos(angle) * 100;
+    player.y = Math.sin(angle) * 100;
+    tracker.beginFrame();
+    tracker.observe(retained, player, {
+      x: player.x - previousX,
+      y: player.y - previousY,
+    }, -0.4);
+    tracker.endFrame(player);
+  }
+  tracker.beginFrame();
+  tracker.observe(retained, player, { x: 0, y: 0 }, -0.4);
+  tracker.observe(newcomer, player, { x: 0, y: 0 }, -0.4);
+  tracker.endFrame(player);
+  assert(tracker.hasPlayerWrapIntent(retained, -0.4),
+    'removing another enemy must not overwrite the retained enemy orbit state');
+  assert(!tracker.hasPlayerWrapIntent(newcomer, -0.4),
+    'a newly contacted enemy must begin with independent zero orbit evidence');
 }
 
 function directLeashClipsOnceWithoutDirectionReversalTest() {
@@ -465,20 +485,22 @@ function enclosedCandidateSharesAutomaticReleaseTest() {
     { enemy: first, startNode: 3, endNode: 7, angle: Math.PI * 0.3, signedSweep: Math.PI * 0.3 },
     { enemy: second, startNode: 9, endNode: 13, angle: Math.PI * 0.3, signedSweep: Math.PI * 0.3 },
   );
-  chain.contactIntentTracker.beginFrame();
-  chain.contactIntentTracker.observe(first, { x: 100, y: 0 }, { x: 0, y: 0 }, Math.PI * 0.3);
-  chain.contactIntentTracker.observe(second, { x: 100, y: 0 }, { x: 0, y: 0 }, Math.PI * 0.3);
-  chain.contactIntentTracker.endFrame();
-  chain.contactIntentTracker.beginFrame();
-  chain.contactIntentTracker.observe(first, { x: 98, y: 24 }, { x: -2, y: 24 }, Math.PI * 0.4);
-  chain.contactIntentTracker.observe(second, { x: 98, y: 24 }, { x: -2, y: 24 }, Math.PI * 0.4);
-  chain.contactIntentTracker.endFrame();
-  chain.contactIntentTracker.beginFrame();
-  chain.contactIntentTracker.observe(first, { x: 88, y: 44 }, { x: -10, y: 20 }, Math.PI * 0.5);
-  chain.contactIntentTracker.observe(second, { x: 88, y: 44 }, { x: -10, y: 20 }, Math.PI * 0.5);
-  chain.contactIntentTracker.endFrame();
   chain.enclosureTracker.candidates.push(enclosed);
   chain.tension = 1;
+  for (const contact of chain.contacts) {
+    chain.releaseQualifications.push({
+      enemy: contact.enemy,
+      contactAngle: contact.angle,
+      playerOrbit: Math.PI * 0.5,
+      tension: 1,
+      contactReady: true,
+      angleReady: true,
+      orbitReady: true,
+      tensionReady: true,
+      canRelease: true,
+      blockReason: 'ready',
+    });
+  }
   chain.updateStuns();
   assert(first.snareTimer > 0 && second.snareTimer > 0,
     'qualifying direct contacts must trigger the automatic release');
@@ -659,6 +681,100 @@ function automaticWrapAndTensionStunTest() {
   ));
   assert(afterDeviation < beforeDeviation * 0.7,
     'automatic stun must straighten the existing node chain instead of leaving the wrap frozen');
+}
+
+function smallTurnBesideEnemyCannotAutoReleaseTest() {
+  const chain = new ChainSimulation();
+  const ball = { x: -190, y: 0 };
+  const player = { x: 190, y: 0 };
+  const enemy = new EnemyState({ x: 0, y: 0 });
+  let maximumAngle = 0;
+  let maximumOrbit = 0;
+  let maximumTension = 0;
+  for (let frame = 0; frame < 120; frame += 1) {
+    const previousX = player.x;
+    const previousY = player.y;
+    const angle = -Math.min(Math.PI / 6, frame / 90 * Math.PI / 6);
+    player.x = Math.cos(angle) * 190;
+    player.y = Math.sin(angle) * 190;
+    chain.update(1 / 60, ball, player, [enemy], 390, {
+      x: player.x - previousX,
+      y: player.y - previousY,
+    });
+    maximumAngle = Math.max(maximumAngle, chain.totalContactAngle);
+    maximumOrbit = Math.max(maximumOrbit, chain.primaryReleaseQualification?.playerOrbit || 0);
+    maximumTension = Math.max(maximumTension, chain.lastPullForce);
+  }
+  assert(maximumAngle >= Math.PI * 0.25 && maximumTension >= 0.98,
+    'small-turn fixture must satisfy the visible bend and full-tension gates');
+  assert(maximumOrbit >= Math.PI * (20 / 180) && maximumOrbit < Math.PI * (45 / 180),
+    'small-turn fixture must contain noticeable movement without a full player wrap');
+  assert(enemy.snareTimer === 0,
+    'a small turn beside an enemy must not be promoted to a completed player wrap');
+}
+
+function automaticReleaseQualificationUsesOneAuthoritativeResultTest() {
+  const chain = new ChainSimulation();
+  const ball = { x: -198, y: 0 };
+  const player = { x: 198, y: 0 };
+  const enemy = new EnemyState({ x: 0, y: 0 });
+  for (let frame = 0; frame < 45; frame += 1) {
+    chain.update(1 / 60, ball, player, [enemy], 396, { x: 0, y: 0 });
+  }
+  const qualification = chain.primaryReleaseQualification;
+  assert(qualification !== null, 'a real body contact must publish one release qualification');
+  assert(qualification.enemy === enemy && qualification.contactReady,
+    'the qualification must identify the same authoritative contact');
+  assert(qualification.contactAngle === chain.totalContactAngle,
+    'HUD and release logic must read the exact same contact angle');
+  assert(qualification.tension === chain.lastPullForce,
+    'HUD and release logic must read the exact same effective tension');
+  assert(!qualification.orbitReady && !qualification.canRelease
+    && qualification.blockReason === 'orbit',
+    'a stationary player must be rejected specifically for missing player-authored orbit');
+}
+
+function sameDirectionContactCannotAutoReleaseIntegrationTest() {
+  const chain = new ChainSimulation();
+  const ball = { x: -198, y: 0 };
+  const player = { x: 198, y: 0 };
+  const enemy = new EnemyState({ x: 0, y: 0 });
+  let maximumAngle = 0;
+  let maximumTension = 0;
+  for (let frame = 0; frame < 90; frame += 1) {
+    player.y += 0.35;
+    enemy.y += 0.35;
+    chain.update(1 / 60, ball, player, [enemy], 396, { x: 0, y: 0.35 });
+    maximumAngle = Math.max(maximumAngle, chain.totalContactAngle);
+    maximumTension = Math.max(maximumTension, chain.lastPullForce);
+  }
+  assert(maximumAngle >= Math.PI * 0.25,
+    'same-direction fixture must retain a visible body bend above 45 degrees');
+  assert(maximumTension >= 0.98,
+    'same-direction fixture must reach the full-tension gate');
+  assert(enemy.snareTimer === 0,
+    'equal same-direction player/enemy travel must never trigger automatic release');
+}
+
+function straightPassCannotAutoReleaseIntegrationTest() {
+  const chain = new ChainSimulation();
+  const ball = { x: -180, y: 0 };
+  const player = { x: -140, y: -40 };
+  const enemy = new EnemyState({ x: 0, y: 0 });
+  let maximumAngle = 0;
+  let maximumTension = 0;
+  for (let frame = 0; frame < 180; frame += 1) {
+    player.x += 2;
+    chain.update(1 / 60, ball, player, [enemy], 317, { x: 2, y: 0 });
+    maximumAngle = Math.max(maximumAngle, chain.totalContactAngle);
+    maximumTension = Math.max(maximumTension, chain.lastPullForce);
+  }
+  assert(maximumAngle >= Math.PI * 0.25,
+    'straight-pass fixture must create a real body bend above 45 degrees');
+  assert(maximumTension >= 0.98,
+    'straight-pass fixture must reach the full-tension gate');
+  assert(enemy.snareTimer === 0,
+    'fixed-heading straight travel past an enemy must not count as active orbit');
 }
 
 function oppositeOrbitCannotStunTest() {
@@ -851,6 +967,12 @@ function controllerUsesOnlyTheRewritePathTest() {
     'runtime controller must commit iron-ball-room player motion through ArenaMotionResolver');
   assert(controller.includes('this.chain.update('),
     'runtime controller must publish ChainSimulation as the gameplay/render route');
+  assert(controller.includes('this.chain.primaryReleaseQualification'),
+    'HUD must read the same authoritative qualification used by automatic release');
+  assert(!simulation.includes('ChainContactIntentTracker')
+    && !simulation.includes('pathTurn')
+    && !simulation.includes('previousSweepMagnitude'),
+    'automatic release must not retain the retired over-fitted intent state machine');
   assert(controller.includes("from './ChainVisualDynamics'"),
     'controller must apply the visual chain only after authoritative simulation');
   assert(!simulation.includes('ChainVisualDynamics'),
@@ -895,10 +1017,10 @@ playerMotionProposalDoesNotCommitTest();
 ordinaryEnemyCannotSteerPlayerThroughChainTest();
 collisionCorrectionIsNotPlayerWrapIntentTest();
 sameDirectionTranslationIsNotPlayerWrapIntentTest();
-relativeAngleWithoutDeeperWrapIsNotIntentTest();
-straightPassWithDeepeningWrapIsNotIntentTest();
-enemyDeepeningWrapWithoutPlayerOrbitIsNotIntentTest();
-openingWrapCancelsStoredPlayerIntentTest();
+enemyMotionCannotCreatePlayerWrapIntentTest();
+playerRelativeOrbitCreatesAndReverseMotionRemovesIntentTest();
+oneFrameContactGapPreservesButLongGapClearsIntentTest();
+multiEnemyWrapStateRemainsIndependentAfterRemovalTest();
 directLeashClipsOnceWithoutDirectionReversalTest();
 occupiedRouteReducesOnlyFutureOutwardAllowanceTest();
 ballAndStunCollisionAuthorityTest();
@@ -916,6 +1038,10 @@ persistentChainCollisionBroadPhaseTest();
 sameChainStraighteningStunsSweptEnemyTest();
 stableContactSideTest();
 automaticWrapAndTensionStunTest();
+smallTurnBesideEnemyCannotAutoReleaseTest();
+automaticReleaseQualificationUsesOneAuthoritativeResultTest();
+sameDirectionContactCannotAutoReleaseIntegrationTest();
+straightPassCannotAutoReleaseIntegrationTest();
 oppositeOrbitCannotStunTest();
 inwardMotionClearsFullTensionTest();
 tautFreeChainStraightensOverTransitionTest();
