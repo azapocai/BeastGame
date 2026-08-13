@@ -6,7 +6,7 @@
 
 `MainGame.scene → GameBootstrap → ChainArenaController → ArenaMotionResolver + ChainSimulation`
 
-应继续维护这条链，并退役旧 `ChainSnareSystem` 解析式体系。旧体系没有场景、Prefab、Controller 或动态加载依赖，只被 `tests/chain-snare.test.js` 和旧模块彼此引用。
+应继续维护这条链。旧 `ChainSnareSystem` 解析式体系经引用确认后已经完整退役。
 
 ## 现行代码：保留
 
@@ -29,7 +29,7 @@
 
 其中 `ChainArenaController.ts` 体积较大，但当前只是单房间技术 Demo；现在拆成更多层只会增加跳转和生命周期协调，不产生实际性能收益，因此本轮不做形式化拆分。
 
-## 已确认退役：逐文件清单
+## 已完成退役：逐文件记录
 
 以下 14 个脚本属于已否决的解析式旧锁链体系：
 
@@ -48,12 +48,12 @@
 13. `ChainRuntimeStats.ts`
 14. `MultiContactRouteSolver.ts`
 
-配套退役项：
+同时删除：
 
 - 上述脚本各自对应的 `.meta` 文件。
 - `tests/chain-snare.test.js`，它只验证旧体系，不代表当前运行架构。
 
-工作区规则禁止批量删除文件，因此本轮没有用脚本或递归命令删除这组文件。后续应按本清单逐个手动删除；删除完成后再移除 `ChainPerformanceBudget` 中只服务旧体系的 `maxExactCandidates`、`maxGuideNodes`、`maxGuideConstraintIterations` 和 `maxRoutePoints`。
+上述文件由用户逐项删除；随后已移除只为旧测试存在的铁球耦合兼容入口，以及 `ChainPerformanceBudget` 中只服务旧体系的 `maxExactCandidates`、`maxGuideNodes`、`maxGuideConstraintIterations` 和 `maxRoutePoints`。当前项目不再编译或测试两套锁链架构。
 
 ## 本轮已实施收口
 
@@ -66,7 +66,8 @@
 - 敌人两两碰撞复用结果对象，避免每次发生重叠时产生临时对象。
 - 敌人碰撞的确定性备用方向改为模块常量，并用直接循环替代每帧 `every()` 回调。
 - `TetherRenderer` 复用颜色常量，消除每帧 Graphics 回退、铁球、眩晕和调试绘制中的 `Color` 分配。
-- `TetherSystem` 中旧耦合 `update/resolveBodyCollisions` 只因历史测试仍存在而暂留，并明确标记为 deprecated；当前 Controller 不调用它们。
+- 删除 `TetherSystem` 中仅供历史测试调用的旧耦合 `update/resolveBodyCollisions`；铁球房只能通过 `ArenaMotionResolver` 提交玩家与实体分离。
+- 铁球高速命中的归一化方向改为复用缓冲区，避免命中检测时创建临时向量。
 
 ## 性能审查
 

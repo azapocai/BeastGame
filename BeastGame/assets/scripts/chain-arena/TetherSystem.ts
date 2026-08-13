@@ -1,5 +1,4 @@
 import { BarrelState, Bounds, EnemyState, PlayerState } from './ArenaModel';
-import { CircleCollisionSolver } from './CircleCollisionSolver';
 import { Math2D, Point2D } from './Math2D';
 
 export interface TetherSnapshot {
@@ -27,6 +26,7 @@ export class IronBallTether implements TetherAnchorProvider {
   lastSpeed = 0;
   tension = 0;
   hitPulse = 0;
+  private readonly impactDirection: Point2D = { x: 0, y: 0 };
 
   constructor(player: PlayerState) {
     this.x = player.x - 112;
@@ -68,41 +68,9 @@ export class IronBallTether implements TetherAnchorProvider {
     this.lastSpeed = Math.hypot(this.vx, this.vy);
   }
 
-  /** @deprecated Historical-test compatibility; runtime uses ArenaMotionResolver. */
-  update(dt: number, player: PlayerState, bounds: Bounds): void {
-    this.integrate(dt, bounds);
-    let dx = player.x - this.x;
-    let dy = player.y - this.y;
-    let distance = Math.hypot(dx, dy);
-    this.tension = Math2D.clamp((distance - this.maxLength * 0.82) / (this.maxLength * 0.18), 0, 1);
-
-    if (distance > this.maxLength) {
-      const nx = dx / distance;
-      const ny = dy / distance;
-      const excess = distance - this.maxLength;
-      const outwardVelocity = Math.max(0, (player.vx - this.vx) * nx + (player.vy - this.vy) * ny);
-      player.x -= nx * excess * 0.78;
-      player.y -= ny * excess * 0.78;
-      this.x += nx * excess * 0.22;
-      this.y += ny * excess * 0.22;
-      this.vx += nx * (outwardVelocity * 0.82 + excess * 90) * dt;
-      this.vy += ny * (outwardVelocity * 0.82 + excess * 90) * dt;
-    }
-
-    dx = player.x - this.x;
-    dy = player.y - this.y;
-    distance = Math.hypot(dx, dy);
-    if (distance > this.maxLength) {
-      const nx = dx / distance;
-      const ny = dy / distance;
-      player.x = this.x + nx * this.maxLength;
-      player.y = this.y + ny * this.maxLength;
-    }
-  }
-
   applyHits(enemies: EnemyState[], barrels: BarrelState[], explodeBarrel: (barrel: BarrelState) => void): void {
     if (this.lastSpeed < 135) return;
-    const direction = Math2D.normalize(this.vx, this.vy);
+    const direction = Math2D.normalize(this.vx, this.vy, this.impactDirection);
     const power = Math2D.clamp((this.lastSpeed - 120) / 180, 0.65, 2.2);
     for (const enemy of enemies) {
       if (enemy.dead || enemy.ballHitCooldown > 0 || !Math2D.overlaps(this, enemy)) continue;
@@ -116,47 +84,6 @@ export class IronBallTether implements TetherAnchorProvider {
       if (!barrel.exploded && Math2D.overlaps(this, barrel) && this.lastSpeed >= 175) explodeBarrel(barrel);
     }
   }
-
-  /** @deprecated Historical-test compatibility; runtime uses ArenaMotionResolver. */
-  resolveBodyCollisions(player: PlayerState, enemies: EnemyState[], bounds: Bounds): boolean {
-    let collided = false;
-    const playerFallback = Math2D.normalize(this.vx || this.x - player.x, this.vy || this.y - player.y);
-    if (CircleCollisionSolver.separateMovable(this, player, 0.18, playerFallback)) collided = true;
-    this.clampToBounds(bounds);
-
-    for (const enemy of enemies) {
-      if (enemy.dead || !enemy.collisionEnabled) continue;
-      const fallback = Math2D.normalize(enemy.x - this.x || -this.vx, enemy.y - this.y || -this.vy);
-      const result = CircleCollisionSolver.separateMovable(enemy, this, 0, fallback);
-      if (!result) continue;
-      collided = true;
-      const impactSpeed = Math.max(0, this.vx * result.normalX + this.vy * result.normalY);
-      if (impactSpeed > 1) {
-        enemy.knockback.x += result.normalX * impactSpeed * 0.32;
-        enemy.knockback.y += result.normalY * impactSpeed * 0.32;
-      }
-      enemy.x = Math2D.clamp(enemy.x, bounds.left + enemy.radius, bounds.right - enemy.radius);
-      enemy.y = Math2D.clamp(enemy.y, bounds.bottom + enemy.radius, bounds.top - enemy.radius);
-    }
-
-    this.enforceDirectLength(player);
-    return collided;
-  }
-
-  private clampToBounds(bounds: Bounds): void {
-    this.x = Math2D.clamp(this.x, bounds.left + this.radius, bounds.right - this.radius);
-    this.y = Math2D.clamp(this.y, bounds.bottom + this.radius, bounds.top - this.radius);
-  }
-
-  private enforceDirectLength(player: PlayerState): void {
-    const dx = player.x - this.x;
-    const dy = player.y - this.y;
-    const distance = Math.hypot(dx, dy);
-    if (distance <= this.maxLength || distance <= 0.001) return;
-    player.x = this.x + dx / distance * this.maxLength;
-    player.y = this.y + dy / distance * this.maxLength;
-  }
-
 }
 
 /**

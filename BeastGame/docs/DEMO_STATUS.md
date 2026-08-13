@@ -1,11 +1,11 @@
 # BeastGame Demo 功能与状态
 
 > 文档状态：当前实现快照  
-> 最近更新：2026-08-12
+> 最近更新：2026-08-13
 > 对应场景：`assets/MainGame.scene`  
 > 启动组件：`assets/scripts/chain-arena/GameBootstrap.ts`
 
-> 架构更正（2026-08-12）：Video 10 反方审查否决了继续修补 `ChainSnareSystem`。当前 Demo 已切换到 `ArenaMotionResolver + ChainSimulation` 的有限重写路径；旧链条、解析接触和 release 模块只保留历史对照，不再由控制器调用。当前准确的实现边界、测试和下一步验收见 `docs/CHAIN_REWRITE_IMPLEMENTATION.md`。本文下方关于旧三层/解析式运行链路的描述属于重写前历史，不应作为当前代码事实。
+> 架构更正（2026-08-13）：当前 Demo 只保留 `ArenaMotionResolver + ChainSimulation` 单权威路径；旧 `ChainSnareSystem`、解析接触、独立 release 模块及旧测试已经删除。当前准确边界见 `docs/CHAIN_REWRITE_IMPLEMENTATION.md` 和 `docs/CODE_AUDIT_2026-08-13.md`。本文仍保留的旧三层/解析式描述只属于需求演进记录。
 
 > 最新补充：自动满张力滑脱会结算同一有效链圈内的非接触敌人；自动滑脱或 C 回直期间，原链节点的连续扫掠路径可以追加绊倒实际命中的敌人，但不会无条件影响附近目标。
 
@@ -223,15 +223,15 @@
 | `CircleCollisionSolver.ts` | 玩家权威/铁球权威的一侧圆形实体分离与速度法向响应 |
 | `ArenaModel.ts` | 玩家、敌人、火药桶、房间数据和铁球锁链规则 |
 | `InputRouter.ts` | 键盘、鼠标、触屏输入统一化 |
-| `TetherSystem.ts` | 固定/动态锚点、铁球和转盘约束、转盘扭矩与机关命中 |
-| `TetherRenderer.ts` | 链节、铁球、转盘和调试路径绘制 |
-| `ChainContactSolver.ts` | 纯几何的连续切点、展开圆弧、接触建立和自然滑脱 |
-| `ChainRouteSolver.ts` | 由同一圆弧生成渲染/约束路径并计算真实链长 |
-| `ChainReleaseTransition.ts` | 活动释放路径、沿多段路径的碰撞接管、原节点到新接触路径的连续交接 |
-| `ChainContactCluster.ts` | 检测密集接触成员并维护进入/释放滞回阈值 |
-| `ChainClusterBoundarySolver.ts` | 已否决且不再被运行代码引用的历史凸包实现，暂留用于对照，不继续维护 |
-| `MultiContactRouteSolver.ts` | 纯计算 0–4 个逐身体圆弧与相邻解析公切线路径，不直接修改游戏状态 |
-| `ChainSnareSystem.ts` | 编排有序/群体接触、原子路径提交、张力、单位影响和眩晕事件 |
+| `TetherSystem.ts` | 铁球积分/命中与暂未开放的转盘机关状态；不提交铁球房玩家位置 |
+| `ArenaMotionResolver.ts` | 铁球房玩家位置和玩家/铁球/敌人单向碰撞的唯一提交者 |
+| `ChainSimulation.ts` | 24 节点链条、碰撞、接触角、张力、眩晕、同链回直和路径发布 |
+| `ChainContactIntentTracker.ts` | 顺向增加、反向抵消的玩家主动缠绕证据 |
+| `ChainEnclosureTracker.ts` | 两次逻辑发布稳定后的圈内候选 |
+| `ChainSweepHitDetector.ts` | 回直过程的宽相位和连续扫掠命中 |
+| `ChainRouteSnapshot.ts` | 玩法与渲染共同读取的复用路径快照 |
+| `ChainPerformanceBudget.ts` | 12 敌人、4 接触、24 节点和 64 链节固定预算 |
+| `TetherRenderer.ts` | Graphics 回退链条、铁球、转盘、眩晕和调试绘制 |
 | `SpriteChainRenderer.ts` | 64 节固定池、沿权威路径采样及接触弧前景分层 |
 | `ChainArenaController.ts` | 游戏流程、碰撞编排、HUD 和占位绘制 |
 | `GameBootstrap.ts` | 创建 Canvas、UI 相机和游戏控制器 |
