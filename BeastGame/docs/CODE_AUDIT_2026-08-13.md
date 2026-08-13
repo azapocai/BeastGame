@@ -10,7 +10,7 @@
 
 ## 现行代码：保留
 
-以下 16 个脚本属于当前运行或直接依赖：
+以下 19 个脚本属于当前运行或直接依赖：
 
 - `GameBootstrap.ts`：场景入口。
 - `ChainArenaController.ts`：当前 Demo 编排与占位表现。
@@ -26,6 +26,8 @@
 - `TetherSystem.ts`：铁球与暂未开放的转盘机关状态。
 - `SpriteChainRenderer.ts`、`TetherRenderer.ts`：Sprite 主链与 Graphics 回退表现。
 - `InputRouter.ts`、`Math2D.ts`：输入和基础数学。
+- `ChainVisualDynamics.ts`：只消费权威快照的固定 16 节点显示后处理。
+- `SpriteAssetLoader.ts`、`ArenaSpriteRenderer.ts`：统一图片加载和固定容量实体 Sprite 表现。
 
 其中 `ChainArenaController.ts` 体积较大，但当前只是单房间技术 Demo；现在拆成更多层只会增加跳转和生命周期协调，不产生实际性能收益，因此本轮不做形式化拆分。
 

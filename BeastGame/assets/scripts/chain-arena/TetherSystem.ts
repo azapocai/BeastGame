@@ -22,7 +22,7 @@ export class IronBallTether implements TetherAnchorProvider {
   vx = 0;
   vy = 0;
   radius = 27;
-  maxLength = 396;
+  maxLength = 317;
   lastSpeed = 0;
   tension = 0;
   hitPulse = 0;

@@ -1,8 +1,8 @@
-import {
-  Color, ImageAsset, Layers, Node, resources, Sprite, SpriteFrame, Texture2D, UITransform, warn,
-} from 'cc';
+import { Color, Layers, Node, Sprite, SpriteFrame, UITransform } from 'cc';
 import { ChainRouteSnapshot } from './ChainRouteSnapshot';
 import { ChainPerformanceBudget } from './ChainPerformanceBudget';
+import { SpriteAssetLoader } from './SpriteAssetLoader';
+import { CHAIN_FULL_TENSION } from './ArenaModel';
 
 /**
  * Fixed-capacity chain-link sprite pool. It only reads an authoritative route
@@ -11,6 +11,9 @@ import { ChainPerformanceBudget } from './ChainPerformanceBudget';
 export class SpriteChainRenderer {
   private static readonly MAX_LINKS = ChainPerformanceBudget.maxVisibleLinks;
   private static readonly LINK_SPACING = 14;
+  // Keep samples 14 px apart; render the icon at half of its original size.
+  private static readonly LINK_WIDTH = 7;
+  private static readonly LINK_HEIGHT = 10;
   private readonly backRoot = new Node('ChainSpriteBack');
   private readonly frontRoot = new Node('ChainSpriteFront');
   private readonly links: Sprite[] = [];
@@ -20,13 +23,19 @@ export class SpriteChainRenderer {
   private spriteFrame: SpriteFrame | null = null;
   private loaded = false;
   private loadError = '';
+  private lastRevision = -1;
+  private lastOffsetX = Number.NaN;
+  private lastOffsetY = Number.NaN;
+  private lastLinkCount = 0;
 
   constructor(parent: Node) {
     this.backRoot.setParent(parent);
     this.frontRoot.setParent(parent);
     this.backRoot.layer = Layers.Enum.UI_2D;
     this.frontRoot.layer = Layers.Enum.UI_2D;
-    this.loadSpriteFrame();
+    this.spriteFrame = SpriteAssetLoader.getFrames().chainLink;
+    this.loaded = true;
+    this.ensurePool();
   }
 
   get ready(): boolean {
@@ -38,11 +47,12 @@ export class SpriteChainRenderer {
   }
 
   /** Places free segments behind actors and contact arcs in front of actors. */
-  placeAround(actorRenderer: Node): void {
+  placeAround(actorRenderer: Node, overlayRenderer?: Node): void {
     const index = actorRenderer.getSiblingIndex();
     this.backRoot.setSiblingIndex(Math.max(0, index));
     actorRenderer.setSiblingIndex(this.backRoot.getSiblingIndex() + 1);
     this.frontRoot.setSiblingIndex(actorRenderer.getSiblingIndex() + 1);
+    if (overlayRenderer) overlayRenderer.setSiblingIndex(this.frontRoot.getSiblingIndex() + 1);
   }
 
   render(snapshot: ChainRouteSnapshot, ox = 0, oy = 0): number {
@@ -50,23 +60,34 @@ export class SpriteChainRenderer {
       this.hideAll();
       return 0;
     }
+    if (snapshot.revision === this.lastRevision && ox === this.lastOffsetX && oy === this.lastOffsetY) {
+      return this.lastLinkCount;
+    }
     this.ensurePool();
     const requested = Math.max(2, Math.floor(snapshot.totalLength / SpriteChainRenderer.LINK_SPACING));
     const linkCount = Math.min(SpriteChainRenderer.MAX_LINKS, requested);
-    const color = snapshot.tension > 0.72 ? this.tenseColor : this.slackColor;
+    const color = snapshot.tension >= CHAIN_FULL_TENSION ? this.tenseColor : this.slackColor;
     for (let index = 0; index < this.links.length; index += 1) {
       const sprite = this.links[index];
       const visible = index < linkCount;
-      sprite.node.active = visible;
+      if (sprite.node.active !== visible) sprite.node.active = visible;
       if (!visible) continue;
       const distance = snapshot.totalLength * (index + 0.5) / linkCount;
       const sample = this.sample(snapshot, distance, this.sampleResult);
       const targetRoot = this.isContactDistance(snapshot, distance) ? this.frontRoot : this.backRoot;
       if (sprite.node.parent !== targetRoot) sprite.node.setParent(targetRoot);
-      sprite.node.setPosition(sample.x + ox, sample.y + oy, 0);
-      sprite.node.angle = Math.atan2(sample.dy, sample.dx) * 180 / Math.PI;
-      sprite.color = color;
+      const x = sample.x + ox;
+      const y = sample.y + oy;
+      const position = sprite.node.position;
+      if (position.x !== x || position.y !== y || position.z !== 0) sprite.node.setPosition(x, y, 0);
+      const angle = Math.atan2(sample.dy, sample.dx) * 180 / Math.PI;
+      if (sprite.node.angle !== angle) sprite.node.angle = angle;
+      if (!sprite.color.equals(color)) sprite.color = color;
     }
+    this.lastRevision = snapshot.revision;
+    this.lastOffsetX = ox;
+    this.lastOffsetY = oy;
+    this.lastLinkCount = linkCount;
     return linkCount;
   }
 
@@ -82,49 +103,30 @@ export class SpriteChainRenderer {
       node.setParent(this.backRoot);
       node.layer = Layers.Enum.UI_2D;
       const transform = node.addComponent(UITransform);
-      transform.setContentSize(13, 19);
       const sprite = node.addComponent(Sprite);
       sprite.spriteFrame = this.spriteFrame;
       sprite.sizeMode = Sprite.SizeMode.CUSTOM;
+      transform.setContentSize(SpriteChainRenderer.LINK_WIDTH, SpriteChainRenderer.LINK_HEIGHT);
       node.active = false;
       this.links.push(sprite);
     }
-  }
-
-  private loadSpriteFrame(): void {
-    resources.load('chain-link/spriteFrame', SpriteFrame, (firstError, firstFrame) => {
-      if (this.acceptSpriteFrame(firstFrame)) return;
-      resources.load('chain-link', SpriteFrame, (secondError, secondFrame) => {
-        if (this.acceptSpriteFrame(secondFrame)) return;
-        resources.load('chain-link', ImageAsset, (imageError, imageAsset) => {
-          if (imageAsset && this.backRoot.isValid && this.frontRoot.isValid) {
-            const texture = new Texture2D();
-            texture.image = imageAsset;
-            const spriteFrame = new SpriteFrame();
-            spriteFrame.texture = texture;
-            if (this.acceptSpriteFrame(spriteFrame)) return;
-          }
-          const errors = [firstError, secondError, imageError]
-            .filter((error) => !!error)
-            .map((error) => String(error!.message || error));
-          this.loadError = errors.join(' | ') || '资源返回为空';
-          warn(`[ChainSpriteRenderer] chain-link 加载失败，启用 Graphics 回退：${this.loadError}`);
-        });
-      });
-    });
-  }
-
-  private acceptSpriteFrame(spriteFrame: SpriteFrame | null): boolean {
-    if (!spriteFrame || !this.backRoot.isValid || !this.frontRoot.isValid) return false;
-    this.spriteFrame = spriteFrame;
-    this.loaded = true;
-    this.loadError = '';
-    this.ensurePool();
-    return true;
+    // Existing pools survive editor script hot-reload. Reapply only when their
+    // cached UI size differs, so the visible icon updates without changing the
+    // 14 px path sampling interval or adding steady-state transform writes.
+    for (const sprite of this.links) {
+      const transform = sprite.getComponent(UITransform);
+      if (!transform) continue;
+      const size = transform.contentSize;
+      if (size.width !== SpriteChainRenderer.LINK_WIDTH || size.height !== SpriteChainRenderer.LINK_HEIGHT) {
+        transform.setContentSize(SpriteChainRenderer.LINK_WIDTH, SpriteChainRenderer.LINK_HEIGHT);
+      }
+    }
   }
 
   private hideAll(): void {
-    for (const link of this.links) link.node.active = false;
+    for (const link of this.links) if (link.node.active) link.node.active = false;
+    this.lastRevision = -1;
+    this.lastLinkCount = 0;
   }
 
   private sample(

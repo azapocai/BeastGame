@@ -1,5 +1,5 @@
 import { Color, Graphics } from 'cc';
-import { EnemyState } from './ArenaModel';
+import { CHAIN_FULL_TENSION, EnemyState } from './ArenaModel';
 import { IronBallTether, TetherSnapshot, TurntableTether } from './TetherSystem';
 import { ChainRouteSnapshot } from './ChainRouteSnapshot';
 
@@ -29,7 +29,7 @@ export class TetherRenderer {
   /** Redraws contact arcs after actors when sprite assets are unavailable. */
   static drawContactForeground(g: Graphics, snapshot: ChainRouteSnapshot, ox = 0, oy = 0): void {
     if (snapshot.contacts.length === 0) return;
-    g.fillColor = snapshot.tension > 0.72 ? TETHER_COLORS.tense : TETHER_COLORS.slack;
+    g.fillColor = snapshot.tension >= CHAIN_FULL_TENSION ? TETHER_COLORS.tense : TETHER_COLORS.slack;
     let previousStart = -1;
     let previousEnd = -1;
     for (const contact of snapshot.contacts) {
@@ -61,7 +61,7 @@ export class TetherRenderer {
     ox: number,
     oy: number,
   ): void {
-    g.fillColor = tension > 0.72 ? TETHER_COLORS.tense : TETHER_COLORS.slack;
+    g.fillColor = tension >= CHAIN_FULL_TENSION ? TETHER_COLORS.tense : TETHER_COLORS.slack;
     for (let segment = 0; segment < points.length - 1; segment += 1) {
       const start = points[segment];
       const end = points[segment + 1];

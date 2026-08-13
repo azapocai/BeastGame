@@ -12,6 +12,8 @@ import { TetherRenderer } from './TetherRenderer';
 import { SpriteChainRenderer } from './SpriteChainRenderer';
 import { ChainSimulation } from './ChainSimulation';
 import { ArenaMotionResolver } from './ArenaMotionResolver';
+import { ChainVisualDynamics } from './ChainVisualDynamics';
+import { ArenaSpriteRenderer } from './ArenaSpriteRenderer';
 
 const { ccclass } = _decorator;
 
@@ -63,6 +65,7 @@ export class ChainArenaController extends Component {
   private staticRenderer!: Node;
   private staticGraphics!: Graphics;
   private spriteChain!: SpriteChainRenderer;
+  private arenaSprites!: ArenaSpriteRenderer;
   private hud!: Label;
   private status!: Label;
   private help!: Label;
@@ -82,12 +85,15 @@ export class ChainArenaController extends Component {
   private ironBall: IronBallTether | null = null;
   private turntable: TurntableTether | null = null;
   private chain = new ChainSimulation();
+  private visualChain = new ChainVisualDynamics();
   private motionResolver = new ArenaMotionResolver();
   private effects: ExplosionEffect[] = [];
   private state: 'playing' | 'transition' | 'lost' | 'won' = 'playing';
   private stateTimer = 0;
   private shake = 0;
   private debugTether = false;
+  private lastHudText = '';
+  private lastStatusText = '';
 
   protected onLoad(): void {
     this.createVisuals();
@@ -98,6 +104,7 @@ export class ChainArenaController extends Component {
   protected onDestroy(): void {
     this.input.disable();
     this.spriteChain?.destroy();
+    this.arenaSprites?.destroy();
     if (this.staticRenderer?.isValid) this.staticRenderer.destroy();
   }
 
@@ -122,6 +129,7 @@ export class ChainArenaController extends Component {
     }
     this.effects.length = liveEffectCount;
     this.shake = Math.max(0, this.shake - dt * 34);
+    this.visualChain.update(dt, this.chain.getRouteSnapshot());
     this.draw();
   }
 
@@ -134,6 +142,7 @@ export class ChainArenaController extends Component {
     staticTransform.setAnchorPoint(0.5, 0.5);
     this.staticGraphics = this.staticRenderer.addComponent(Graphics);
     this.drawArena(this.staticGraphics, 0, 0);
+    this.arenaSprites = new ArenaSpriteRenderer(this.node);
     this.spriteChain = new SpriteChainRenderer(this.node);
 
     const renderer = new Node('ArenaRenderer');
@@ -143,7 +152,7 @@ export class ChainArenaController extends Component {
     transform.setContentSize(LOGICAL_WIDTH, LOGICAL_HEIGHT);
     transform.setAnchorPoint(0.5, 0.5);
     this.graphics = renderer.addComponent(Graphics);
-    this.spriteChain.placeAround(renderer);
+    this.spriteChain.placeAround(this.arenaSprites.actorRoot, renderer);
 
     this.hud = this.createLabel('Hud', new Vec2(-430, 265), 18, new Color(247, 233, 205));
     this.status = this.createLabel('Status', new Vec2(0, 265), 18, new Color(255, 208, 111), true);
@@ -184,6 +193,7 @@ export class ChainArenaController extends Component {
     this.ironBall = room.mechanic === 'iron-ball' ? new IronBallTether(this.player) : null;
     this.turntable = room.mechanic === 'turntable' ? new TurntableTether(0, 0) : null;
     this.chain.reset();
+    this.visualChain.reset();
     this.effects = [];
     this.state = 'playing';
     this.stateTimer = 0;
@@ -353,20 +363,29 @@ export class ChainArenaController extends Component {
     g.clear();
     const shakeX = this.shake ? (Math.random() - 0.5) * this.shake : 0;
     const shakeY = this.shake ? (Math.random() - 0.5) * this.shake : 0;
-    this.staticRenderer.setPosition(shakeX, shakeY, 0);
+    this.arenaSprites.render(this.player, this.enemies, this.barrels, this.ironBall, shakeX, shakeY);
+    this.staticRenderer.active = !this.arenaSprites.arenaReady;
+    if (this.staticRenderer.active) this.staticRenderer.setPosition(shakeX, shakeY, 0);
     if (this.turntable) TetherRenderer.drawTurntable(g, this.turntable, shakeX, shakeY);
+    const chainSnapshot = this.visualChain.getSnapshot();
     if (this.ironBall || this.turntable) {
-      const links = this.spriteChain.render(this.chain.getRouteSnapshot(), shakeX, shakeY);
-      if (links === 0) TetherRenderer.drawChainSnapshot(g, this.chain.getRouteSnapshot(), shakeX, shakeY);
+      const links = this.spriteChain.render(chainSnapshot, shakeX, shakeY);
+      if (links === 0) TetherRenderer.drawChainSnapshot(g, chainSnapshot, shakeX, shakeY);
     }
-    for (const barrel of this.barrels) this.drawBarrel(g, barrel, shakeX, shakeY);
-    for (const enemy of this.enemies) if (!enemy.dead) this.drawEnemy(g, enemy, shakeX, shakeY);
+    if (!this.arenaSprites.barrelReady) {
+      for (const barrel of this.barrels) this.drawBarrel(g, barrel, shakeX, shakeY);
+    }
+    for (const enemy of this.enemies) {
+      if (!enemy.dead) this.drawEnemy(g, enemy, shakeX, shakeY, !this.arenaSprites.unitReady);
+    }
     if (!this.spriteChain.ready) {
-      TetherRenderer.drawContactForeground(g, this.chain.getRouteSnapshot(), shakeX, shakeY);
+      TetherRenderer.drawContactForeground(g, chainSnapshot, shakeX, shakeY);
     }
     for (const enemy of this.enemies) if (!enemy.dead && enemy.snareTimer > 0) TetherRenderer.drawSnare(g, enemy, shakeX, shakeY);
-    this.drawPlayer(g, shakeX, shakeY);
-    if (this.ironBall) TetherRenderer.drawIronBall(g, this.ironBall, shakeX, shakeY);
+    this.drawPlayer(g, shakeX, shakeY, !this.arenaSprites.unitReady);
+    if (this.ironBall && !this.arenaSprites.ballReady) {
+      TetherRenderer.drawIronBall(g, this.ironBall, shakeX, shakeY);
+    }
     if (this.debugTether && this.ironBall) TetherRenderer.drawDebug(g, this.ironBall.getSnapshot(this.player), shakeX, shakeY);
     if (this.debugTether && this.turntable) TetherRenderer.drawDebug(g, this.turntable.getSnapshot(this.player), shakeX, shakeY);
     this.drawEffects(g, shakeX, shakeY);
@@ -396,7 +415,7 @@ export class ChainArenaController extends Component {
     g.stroke();
   }
 
-  private drawPlayer(g: Graphics, ox: number, oy: number): void {
+  private drawPlayer(g: Graphics, ox: number, oy: number, drawBody: boolean): void {
     const player = this.player;
     if (player.attackFlash > 0) {
       const angle = Math.atan2(player.aim.y, player.aim.x);
@@ -406,12 +425,14 @@ export class ChainArenaController extends Component {
       g.close();
       g.fill();
     }
-    g.fillColor = player.hitFlash > 0 ? DRAW_COLORS.playerHit : DRAW_COLORS.player;
-    g.strokeColor = DRAW_COLORS.playerStroke;
-    g.lineWidth = 4;
-    g.circle(player.x + ox, player.y + oy, player.radius);
-    g.fill();
-    g.stroke();
+    if (drawBody) {
+      g.fillColor = player.hitFlash > 0 ? DRAW_COLORS.playerHit : DRAW_COLORS.player;
+      g.strokeColor = DRAW_COLORS.playerStroke;
+      g.lineWidth = 4;
+      g.circle(player.x + ox, player.y + oy, player.radius);
+      g.fill();
+      g.stroke();
+    }
     g.strokeColor = DRAW_COLORS.aim;
     g.lineWidth = 8;
     g.moveTo(player.x + ox, player.y + oy);
@@ -428,7 +449,7 @@ export class ChainArenaController extends Component {
     }
   }
 
-  private drawEnemy(g: Graphics, enemy: EnemyState, ox: number, oy: number): void {
+  private drawEnemy(g: Graphics, enemy: EnemyState, ox: number, oy: number, drawBody: boolean): void {
     if (enemy.attackFlash > 0) {
       const angle = Math.atan2(enemy.attackDirection.y, enemy.attackDirection.x);
       g.fillColor = DRAW_COLORS.enemyAttack;
@@ -437,16 +458,18 @@ export class ChainArenaController extends Component {
       g.close();
       g.fill();
     }
-    g.fillColor = enemy.hitFlash > 0
-      ? DRAW_COLORS.enemyHit
-      : enemy.snareTimer > 0
-        ? DRAW_COLORS.enemyStunned
-        : enemy.tier === 2 ? DRAW_COLORS.enemyHeavy : DRAW_COLORS.enemy;
-    g.strokeColor = DRAW_COLORS.enemyStroke;
-    g.lineWidth = 4;
-    g.circle(enemy.x + ox, enemy.y + oy, enemy.radius);
-    g.fill();
-    g.stroke();
+    if (drawBody) {
+      g.fillColor = enemy.hitFlash > 0
+        ? DRAW_COLORS.enemyHit
+        : enemy.snareTimer > 0
+          ? DRAW_COLORS.enemyStunned
+          : enemy.tier === 2 ? DRAW_COLORS.enemyHeavy : DRAW_COLORS.enemy;
+      g.strokeColor = DRAW_COLORS.enemyStroke;
+      g.lineWidth = 4;
+      g.circle(enemy.x + ox, enemy.y + oy, enemy.radius);
+      g.fill();
+      g.stroke();
+    }
     if (enemy.tier === 2) {
       g.strokeColor = DRAW_COLORS.heavyAccent;
       g.lineWidth = 5;
@@ -526,17 +549,18 @@ export class ChainArenaController extends Component {
     const room = ROOM_DEFINITIONS[this.roomIndex];
     let remaining = 0;
     for (const enemy of this.enemies) if (!enemy.dead) remaining += 1;
-    this.hud.string = `${room.name}\n${room.subtitle}\n敌人 ${remaining}  ·  生命 ${Math.ceil(this.player.health)}`;
-    if (this.state === 'transition') this.status.string = `房间通过 · 即将进入 ${ROOM_DEFINITIONS[this.roomIndex + 1].name}`;
-    else if (this.state === 'lost') this.status.string = '挑战失败 · 按 R 重新开始';
-    else if (this.state === 'won') this.status.string = 'Demo 完成 · 按 R 再玩一次';
-    else if (this.ironBall) this.status.string = `铁球速度 ${Math.round(this.ironBall.lastSpeed)} · 无伤害测试`;
+    const hudText = `${room.name}\n${room.subtitle}\n敌人 ${remaining}  ·  生命 ${Math.ceil(this.player.health)}`;
+    let statusText = '';
+    if (this.state === 'transition') statusText = `房间通过 · 即将进入 ${ROOM_DEFINITIONS[this.roomIndex + 1].name}`;
+    else if (this.state === 'lost') statusText = '挑战失败 · 按 R 重新开始';
+    else if (this.state === 'won') statusText = 'Demo 完成 · 按 R 再玩一次';
+    else if (this.ironBall) statusText = `铁球速度 ${Math.round(this.ironBall.lastSpeed)} · 无伤害测试`;
     else if (this.turntable) {
-      this.status.string = `杆端速度 ${Math.round(this.turntable.lastAnchorSpeed)} · 张力 ${Math.round(this.turntable.tension * 100)}%`;
+      statusText = `杆端速度 ${Math.round(this.turntable.lastAnchorSpeed)} · 张力 ${Math.round(this.turntable.tension * 100)}%`;
     }
-    else this.status.string = '近战命中敌人两次即可击杀';
-    if (this.chain.activeCount > 0) this.status.string += ` · 绊倒 ${this.chain.activeCount}`;
-    if (this.chain.enclosedCount > 0) this.status.string += ` · 圈内候选 ${this.chain.enclosedCount}`;
+    else statusText = '近战命中敌人两次即可击杀';
+    if (this.chain.activeCount > 0) statusText += ` · 绊倒 ${this.chain.activeCount}`;
+    if (this.chain.enclosedCount > 0) statusText += ` · 圈内候选 ${this.chain.enclosedCount}`;
     if (this.chain.contactCount > 0) {
       const contactAngles = `局部绕角 ${Math.round(this.chain.totalContactAngle * 180 / Math.PI)}°`;
       const state = this.chain.securedCount > 0
@@ -544,9 +568,17 @@ export class ChainArenaController extends Component {
         : this.chain.pullThroughReady
           ? `${contactAngles} · 张力 100% 可拉脱`
           : `${contactAngles} · ${this.chain.directionHint} · 按 C 强制绊倒`;
-      this.status.string += ` · ${state} · 拉力 ${Math.round(this.chain.lastPullForce * 100)}%`;
+      statusText += ` · ${state} · 拉力 ${Math.round(this.chain.lastPullForce * 100)}%`;
     }
-    if (this.player.fallTimer > 0) this.status.string += ` · 摔倒 ${this.player.fallTimer.toFixed(1)} 秒`;
-    if (this.debugTether && (this.ironBall || this.turntable)) this.status.string += ' · 锁链调试 ON';
+    if (this.player.fallTimer > 0) statusText += ` · 摔倒 ${this.player.fallTimer.toFixed(1)} 秒`;
+    if (this.debugTether && (this.ironBall || this.turntable)) statusText += ' · 锁链调试 ON';
+    if (hudText !== this.lastHudText) {
+      this.hud.string = hudText;
+      this.lastHudText = hudText;
+    }
+    if (statusText !== this.lastStatusText) {
+      this.status.string = statusText;
+      this.lastStatusText = statusText;
+    }
   }
 }

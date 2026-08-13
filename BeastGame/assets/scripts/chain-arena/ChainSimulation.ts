@@ -1,4 +1,4 @@
-import { EnemyState } from './ArenaModel';
+import { CHAIN_FULL_TENSION, EnemyState } from './ArenaModel';
 import { ChainPerformanceBudget } from './ChainPerformanceBudget';
 import { ChainRouteSnapshot, RouteContactRange } from './ChainRouteSnapshot';
 import { ChainSweepBounds, ChainSweepHitDetector } from './ChainSweepHitDetector';
@@ -30,6 +30,7 @@ const ZERO_MOTION: Point2D = { x: 0, y: 0 };
 export class ChainSimulation {
   private static readonly CONTACT_PADDING = 2;
   private static readonly STUN_ANGLE = Math.PI * 0.25;
+  private static readonly TAUT_FREE_STRAIGHTEN_DURATION = 0.28;
   private static readonly STUN_DURATION = 1.2;
   private static readonly DAMPING_PER_SECOND = 0.12;
   private static readonly STRAIGHTEN_DURATION = 0.24;
@@ -52,6 +53,7 @@ export class ChainSimulation {
   };
   private readonly releaseCandidates: EnemyState[] = [];
   private readonly releaseHitTargets = new Set<EnemyState>();
+  private readonly tautFreeStartNodes: Point2D[] = [];
   private readonly snapshot = new ChainRouteSnapshot();
   private readonly stunnedTargets = new Set<EnemyState>();
   private accumulator = 0;
@@ -60,8 +62,9 @@ export class ChainSimulation {
   private initialized = false;
   private enclosedTargets = 0;
   private straightenTimer = 0;
+  private tautFreeStraightenElapsed = -1;
   private evaluatedContactAngle = 0;
-  private physicalRouteLength = 0;
+  private requiredRouteLength = 0;
   private releaseCandidatesSeeded = false;
   private collisionNarrowPhaseChecks = 0;
 
@@ -96,10 +99,10 @@ export class ChainSimulation {
     const first = this.nodes[0];
     const last = this.nodes[this.nodes.length - 1];
     const directLength = Math.hypot(last.x - first.x, last.y - first.y);
-    return Math.max(0, this.physicalRouteLength - directLength);
+    return Math.max(0, this.requiredRouteLength - directLength);
   }
   get influencingEnemy(): EnemyState | null {
-    if (this.tension < 0.98) return null;
+    if (this.tension < CHAIN_FULL_TENSION) return null;
     for (const contact of this.contacts) if (contact.enemy.canInfluenceTether) return contact.enemy;
     return null;
   }
@@ -119,8 +122,9 @@ export class ChainSimulation {
     this.initialized = false;
     this.enclosedTargets = 0;
     this.straightenTimer = 0;
+    this.tautFreeStraightenElapsed = -1;
     this.evaluatedContactAngle = 0;
-    this.physicalRouteLength = 0;
+    this.requiredRouteLength = 0;
     this.releaseCandidatesSeeded = false;
     if (start && end) this.initialize(start, end, this.maxLength);
   }
@@ -152,6 +156,7 @@ export class ChainSimulation {
     this.rebuildContacts(enemies, end, playerDrivenMotion);
     this.evaluatedContactAngle = this.contacts[0]?.angle || 0;
     this.measureTension();
+    if (this.updateTautFreeChainStraightening(dt, start, end)) this.measureTension();
     this.updateStuns();
     this.publish();
     for (const enemy of this.stunnedTargets) {
@@ -181,6 +186,10 @@ export class ChainSimulation {
       node.previousX = x;
       node.previousY = y;
       this.nodes[index] = node;
+      const tautStart = this.tautFreeStartNodes[index] || { x: 0, y: 0 };
+      tautStart.x = x;
+      tautStart.y = y;
+      this.tautFreeStartNodes[index] = tautStart;
     }
     this.maxLength = Math.max(1, maxLength);
     this.initialized = true;
@@ -409,7 +418,7 @@ export class ChainSimulation {
   }
 
   private updateStuns(): void {
-    if (this.tension < 0.98) return;
+    if (this.tension < CHAIN_FULL_TENSION) return;
     let triggered = false;
     for (const contact of this.contacts) {
       if (contact.angle < ChainSimulation.STUN_ANGLE) continue;
@@ -555,7 +564,6 @@ export class ChainSimulation {
     this.cumulativeLengths.length = this.nodes.length;
     this.cumulativeLengths[0] = 0;
     let measuredTotalLength = 0;
-    let constrainedLength = 0;
     const maximumSegmentLength = this.maxLength / (this.nodes.length - 1);
     for (let index = 1; index < this.nodes.length; index += 1) {
       const segmentLength = Math.hypot(
@@ -563,17 +571,86 @@ export class ChainSimulation {
         this.nodes[index].y - this.nodes[index - 1].y,
       );
       measuredTotalLength += segmentLength;
-      // Collision/constraint iterations can leave a small local overrun.
-      // It is diagnostic geometry error, not additional physical rope length.
-      constrainedLength += Math.min(segmentLength, maximumSegmentLength);
       this.cumulativeLengths[index] = measuredTotalLength;
     }
+    // A rope may keep its full contour length while visibly slack, so the raw
+    // PBD polyline length cannot represent transmitted tension. Free spans use
+    // their shortest chord; only spans that are actually touching bodies keep
+    // their routed arc length. This is the minimum current route that must be
+    // paid from the physical chain budget.
+    let requiredRouteLength = 0;
+    let cursorNode = 0;
+    const lastNode = this.nodes.length - 1;
+    for (const contact of this.contacts) {
+      const contactStart = Math.max(cursorNode, Math.min(lastNode, contact.startNode));
+      const contactEnd = Math.max(contactStart, Math.min(lastNode, contact.endNode));
+      if (contactEnd <= cursorNode) continue;
+      requiredRouteLength += Math.hypot(
+        this.nodes[contactStart].x - this.nodes[cursorNode].x,
+        this.nodes[contactStart].y - this.nodes[cursorNode].y,
+      );
+      for (let index = contactStart + 1; index <= contactEnd; index += 1) {
+        requiredRouteLength += Math.min(maximumSegmentLength, Math.hypot(
+          this.nodes[index].x - this.nodes[index - 1].x,
+          this.nodes[index].y - this.nodes[index - 1].y,
+        ));
+      }
+      cursorNode = contactEnd;
+    }
+    requiredRouteLength += Math.hypot(
+      this.nodes[lastNode].x - this.nodes[cursorNode].x,
+      this.nodes[lastNode].y - this.nodes[cursorNode].y,
+    );
     this.tension = Math2D.clamp(
-      (constrainedLength - this.maxLength * 0.94) / (this.maxLength * 0.06),
+      (requiredRouteLength - this.maxLength * 0.94) / (this.maxLength * 0.06),
       0,
       1,
     );
-    this.physicalRouteLength = constrainedLength;
+    this.requiredRouteLength = requiredRouteLength;
+  }
+
+  /**
+   * Constraint iterations intentionally preserve a slack contour, but when a
+   * free chain has reached transmitted full tension there is no remaining
+   * physical slack to display. Retract only the contact-free route over a
+   * short fixed transition; real body-contact arcs remain authored by the
+   * normal PBD/contact path.
+   */
+  private updateTautFreeChainStraightening(dt: number, start: Point2D, end: Point2D): boolean {
+    const eligible = this.tension >= CHAIN_FULL_TENSION
+      && this.contacts.length === 0
+      && this.straightenTimer <= 0;
+    if (!eligible) {
+      this.tautFreeStraightenElapsed = -1;
+      return false;
+    }
+    if (this.tautFreeStraightenElapsed < 0) {
+      for (let index = 0; index < this.nodes.length; index += 1) {
+        const source = this.nodes[index];
+        const target = this.tautFreeStartNodes[index];
+        target.x = source.x;
+        target.y = source.y;
+      }
+      this.tautFreeStraightenElapsed = 0;
+    }
+    this.tautFreeStraightenElapsed = Math.min(
+      ChainSimulation.TAUT_FREE_STRAIGHTEN_DURATION,
+      this.tautFreeStraightenElapsed + Math.max(0, dt),
+    );
+    const blend = this.tautFreeStraightenElapsed / ChainSimulation.TAUT_FREE_STRAIGHTEN_DURATION;
+    const last = this.nodes.length - 1;
+    for (let index = 1; index < last; index += 1) {
+      const node = this.nodes[index];
+      const source = this.tautFreeStartNodes[index];
+      const t = index / last;
+      const targetX = start.x + (end.x - start.x) * t;
+      const targetY = start.y + (end.y - start.y) * t;
+      node.x = source.x + (targetX - source.x) * blend;
+      node.y = source.y + (targetY - source.y) * blend;
+      node.previousX = node.x;
+      node.previousY = node.y;
+    }
+    return true;
   }
 
   private straightenSameNodes(dt: number, start: Point2D, end: Point2D): void {

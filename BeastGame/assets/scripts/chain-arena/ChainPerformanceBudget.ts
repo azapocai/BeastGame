@@ -7,5 +7,7 @@ export const ChainPerformanceBudget = Object.freeze({
   guideFixedStep: 1 / 60,
   maxGuideSubsteps: 3,
   enclosureStableSteps: 2,
+  visualNodes: 16,
   maxVisibleLinks: 64,
+  maxVisibleBarrels: 8,
 });

@@ -38,6 +38,18 @@ function distanceToSegment(point, start, end) {
   return Math.hypot(point.x - (start.x + dx * t), point.y - (start.y + dy * t));
 }
 
+function sampleRoute(snapshot, distance) {
+  let segment = 0;
+  while (segment < snapshot.cumulativeLengths.length - 2
+    && snapshot.cumulativeLengths[segment + 1] < distance) segment += 1;
+  const start = snapshot.points[segment];
+  const end = snapshot.points[segment + 1];
+  const segmentLength = Math.max(0.0001,
+    snapshot.cumulativeLengths[segment + 1] - snapshot.cumulativeLengths[segment]);
+  const t = Math.max(0, Math.min(1, (distance - snapshot.cumulativeLengths[segment]) / segmentLength));
+  return { x: start.x + (end.x - start.x) * t, y: start.y + (end.y - start.y) * t };
+}
+
 function bruteSweepHit(previous, current, circle, padding = 0) {
   const radius = circle.radius + padding;
   const radiusSquared = radius * radius;
@@ -67,6 +79,9 @@ function bruteSweepHit(previous, current, circle, padding = 0) {
 
 const { ArenaMotionResolver } = loadModule(path.join(sourceRoot, 'ArenaMotionResolver.ts'));
 const { ChainSimulation } = loadModule(path.join(sourceRoot, 'ChainSimulation.ts'));
+const { ChainContactIntentTracker } = loadModule(path.join(sourceRoot, 'ChainContactIntentTracker.ts'));
+const { ChainVisualDynamics } = loadModule(path.join(sourceRoot, 'ChainVisualDynamics.ts'));
+const { ChainRouteSnapshot } = loadModule(path.join(sourceRoot, 'ChainRouteSnapshot.ts'));
 const { ChainSweepHitDetector } = loadModule(path.join(sourceRoot, 'ChainSweepHitDetector.ts'));
 const { ChainPerformanceBudget } = loadModule(path.join(sourceRoot, 'ChainPerformanceBudget.ts'));
 const { EnemyState, PlayerState } = loadModule(path.join(sourceRoot, 'ArenaModel.ts'));
@@ -126,6 +141,131 @@ function collisionCorrectionIsNotPlayerWrapIntentTest() {
     'enemy collision correction must not create player-driven wrap x');
   near(result.playerDrivenDelta.y, 0, 1e-9,
     'enemy collision correction must not create player-driven wrap y');
+}
+
+function sameDirectionTranslationIsNotPlayerWrapIntentTest() {
+  const tracker = new ChainContactIntentTracker();
+  const enemy = new EnemyState({ x: 0, y: 0 });
+  const player = { x: 100, y: 20 };
+  tracker.beginFrame();
+  tracker.observe(enemy, player, { x: 0, y: 0 }, -0.2);
+  tracker.endFrame();
+  for (let frame = 0; frame < 60; frame += 1) {
+    enemy.x += 2;
+    player.x += 2;
+    tracker.beginFrame();
+    tracker.observe(enemy, player, { x: 2, y: 0 }, -0.2);
+    tracker.endFrame();
+  }
+  assert(!tracker.hasPlayerWrapIntent(enemy),
+    'equal same-direction player/enemy translation must not accumulate relative wrap intent');
+}
+
+function relativeAngleWithoutDeeperWrapIsNotIntentTest() {
+  const tracker = new ChainContactIntentTracker();
+  const enemy = new EnemyState({ x: 0, y: 0 });
+  const player = { x: 100, y: 0 };
+  tracker.beginFrame();
+  tracker.observe(enemy, player, { x: 0, y: 0 }, Math.PI * 0.45);
+  tracker.endFrame();
+  for (let frame = 1; frame <= 30; frame += 1) {
+    const previousX = player.x;
+    const previousY = player.y;
+    const angle = frame * Math.PI / 180;
+    player.x = Math.cos(angle) * 100;
+    player.y = Math.sin(angle) * 100;
+    tracker.beginFrame();
+    tracker.observe(
+      enemy,
+      player,
+      { x: player.x - previousX, y: player.y - previousY },
+      Math.PI * 0.45,
+    );
+    tracker.endFrame();
+  }
+  assert(!tracker.hasPlayerWrapIntent(enemy),
+    'relative player angle without a simultaneously deepening real body wrap must not create release intent');
+}
+
+function straightPassWithDeepeningWrapIsNotIntentTest() {
+  const tracker = new ChainContactIntentTracker();
+  const enemy = new EnemyState({ x: 0, y: 0 });
+  const player = { x: 5, y: 30 };
+  tracker.beginFrame();
+  tracker.observe(enemy, player, { x: 2, y: 0 }, Math.PI * 0.25);
+  tracker.endFrame();
+  for (let frame = 1; frame <= 40; frame += 1) {
+    player.x += 2;
+    tracker.beginFrame();
+    tracker.observe(enemy, player, { x: 2, y: 0 }, Math.PI * (0.25 + frame * 0.01));
+    tracker.endFrame();
+  }
+  assert(!tracker.hasPlayerWrapIntent(enemy),
+    'a straight pass near an enemy must not count as orbit even when polar angle and body bend both increase');
+}
+
+function enemyDeepeningWrapWithoutPlayerOrbitIsNotIntentTest() {
+  const tracker = new ChainContactIntentTracker();
+  const enemy = new EnemyState({ x: 0, y: 0 });
+  const player = { x: 100, y: 0 };
+  tracker.beginFrame();
+  tracker.observe(enemy, player, { x: 0, y: 0 }, Math.PI * 0.2);
+  tracker.endFrame();
+  for (let frame = 1; frame <= 30; frame += 1) {
+    tracker.beginFrame();
+    tracker.observe(enemy, player, { x: 0, y: 0 }, Math.PI * (0.2 + frame * 0.01));
+    tracker.endFrame();
+  }
+  assert(!tracker.hasPlayerWrapIntent(enemy),
+    'a deepening PBD/enemy-driven bend without player orbit must not create release intent');
+}
+
+function openingWrapCancelsStoredPlayerIntentTest() {
+  const chain = new ChainSimulation();
+  const tracker = chain.contactIntentTracker;
+  const enemy = new EnemyState({ x: 0, y: 0 });
+  const player = { x: 100, y: 0 };
+  tracker.beginFrame();
+  tracker.observe(enemy, player, { x: 0, y: 0 }, Math.PI * 0.6);
+  tracker.endFrame();
+
+  for (let degree = 1; degree <= 18; degree += 1) {
+    const previousX = player.x;
+    const previousY = player.y;
+    const orbit = Math.PI * (degree / 180);
+    player.x = Math.cos(orbit) * 100;
+    player.y = Math.sin(orbit) * 100;
+    tracker.beginFrame();
+    tracker.observe(
+      enemy,
+      player,
+      { x: player.x - previousX, y: player.y - previousY },
+      Math.PI * (0.6 + degree / 180),
+    );
+    tracker.endFrame();
+  }
+  assert(tracker.hasPlayerWrapIntent(enemy), 'fixture must first accumulate valid player wrap intent');
+
+  for (let frame = 0; frame < 12; frame += 1) {
+    enemy.x += 2;
+    player.x += 2;
+    tracker.beginFrame();
+    tracker.observe(enemy, player, { x: 2, y: 0 }, Math.PI * (0.6 - (frame + 1) * 0.025));
+    tracker.endFrame();
+  }
+  assert(!tracker.hasPlayerWrapIntent(enemy),
+    'an opening body wrap during same-direction travel must revoke stale automatic-release intent');
+  chain.contacts.push({
+    enemy,
+    startNode: 4,
+    endNode: 8,
+    angle: Math.PI * 0.45,
+    signedSweep: Math.PI * 0.45,
+  });
+  chain.tension = 1;
+  chain.updateStuns();
+  assert(enemy.snareTimer === 0,
+    'full tension plus a remaining 81-degree bend must not auto-release after its old intent was revoked');
 }
 
 function directLeashClipsOnceWithoutDirectionReversalTest() {
@@ -330,8 +470,12 @@ function enclosedCandidateSharesAutomaticReleaseTest() {
   chain.contactIntentTracker.observe(second, { x: 100, y: 0 }, { x: 0, y: 0 }, Math.PI * 0.3);
   chain.contactIntentTracker.endFrame();
   chain.contactIntentTracker.beginFrame();
-  chain.contactIntentTracker.observe(first, { x: 98, y: 24 }, { x: -2, y: 24 }, Math.PI * 0.3);
-  chain.contactIntentTracker.observe(second, { x: 98, y: 24 }, { x: -2, y: 24 }, Math.PI * 0.3);
+  chain.contactIntentTracker.observe(first, { x: 98, y: 24 }, { x: -2, y: 24 }, Math.PI * 0.4);
+  chain.contactIntentTracker.observe(second, { x: 98, y: 24 }, { x: -2, y: 24 }, Math.PI * 0.4);
+  chain.contactIntentTracker.endFrame();
+  chain.contactIntentTracker.beginFrame();
+  chain.contactIntentTracker.observe(first, { x: 88, y: 44 }, { x: -10, y: 20 }, Math.PI * 0.5);
+  chain.contactIntentTracker.observe(second, { x: 88, y: 44 }, { x: -10, y: 20 }, Math.PI * 0.5);
   chain.contactIntentTracker.endFrame();
   chain.enclosureTracker.candidates.push(enclosed);
   chain.tension = 1;
@@ -523,7 +667,6 @@ function oppositeOrbitCannotStunTest() {
   const player = { x: 190, y: 0 };
   const enemy = new EnemyState({ x: 0, y: 0 });
   let maximumAngle = 0;
-  let maximumTension = 0;
   for (let frame = 0; frame < 150; frame += 1) {
     const previousX = player.x;
     const previousY = player.y;
@@ -535,14 +678,43 @@ function oppositeOrbitCannotStunTest() {
       y: player.y - previousY,
     });
     maximumAngle = Math.max(maximumAngle, chain.totalContactAngle);
-    maximumTension = Math.max(maximumTension, chain.lastPullForce);
   }
   assert(maximumAngle >= Math.PI * 0.25,
     'opposite-direction fixture must still produce a visible bend above 45 degrees');
-  assert(maximumTension >= 0.98,
-    'opposite-direction fixture must still pull the chain to full tension');
   assert(enemy.snareTimer === 0,
     'moving against the signed contact bend must unwrap it, never trigger an automatic stun');
+}
+
+function inwardMotionClearsFullTensionTest() {
+  const chain = new ChainSimulation();
+  const ball = { x: -198, y: 0 };
+  const player = { x: 198, y: 0 };
+  chain.update(1 / 60, ball, player, [], 396, { x: 0, y: 0 });
+  assert(chain.lastPullForce >= 0.98, 'fixture must begin at full tension');
+  player.x = 100;
+  chain.update(1 / 60, ball, player, [], 396, { x: -98, y: 0 });
+  assert(chain.lastPullForce < 0.01,
+    `moving inward must clear full tension even while the PBD contour remains long; got ${chain.lastPullForce}`);
+}
+
+function tautFreeChainStraightensOverTransitionTest() {
+  const chain = new ChainSimulation();
+  const ball = { x: -158.5, y: 0 };
+  const player = { x: 158.5, y: 0 };
+  chain.reset(ball, player, 317);
+  for (let index = 1; index < chain.nodes.length - 1; index += 1) {
+    const node = chain.nodes[index];
+    node.y = Math.sin(index / (chain.nodes.length - 1) * Math.PI) * 80;
+    node.previousY = node.y;
+  }
+  chain.update(1 / 60, ball, player, [], 317);
+  assert(chain.lastPullForce >= 0.98, 'fixture must reach the full-tension threshold');
+  const firstDeviation = Math.max(...chain.getRouteSnapshot().points.map((point) => Math.abs(point.y)));
+  assert(firstDeviation > 0.01 && firstDeviation < 80,
+    'a taut free chain must begin a visible retraction instead of snapping or retaining its full slack arc');
+  for (let frame = 0; frame < 20; frame += 1) chain.update(1 / 60, ball, player, [], 317);
+  assert(chain.getRouteSnapshot().points.every((point) => Math.abs(point.y) <= 1e-9),
+    'a taut free chain must finish its short straightening transition');
 }
 
 function tautChainContactWithoutPlayerOrbitCannotStunTest() {
@@ -569,14 +741,14 @@ function tautChainContactWithoutPlayerOrbitCannotStunTest() {
 function localSegmentOverrunCannotFakeFullTensionTest() {
   const chain = new ChainSimulation();
   chain.update(0, { x: 0, y: 0 }, { x: 230, y: 0 }, [], 400);
-  // White-box numerical fixture: 22 slack ten-unit segments plus one local
-  // 280-unit solver overrun. The raw polyline is longer than the whole rope,
-  // but only one physical segment is loaded; it cannot transmit full tension.
+  // White-box numerical fixture: move one interior node far away while both
+  // endpoints remain only 230 units apart. Local solver error must not turn a
+  // slack endpoint route into transmitted full tension.
   for (let index = 0; index < chain.nodes.length; index += 1) {
     chain.nodes[index].x = index * 10;
     chain.nodes[index].y = 0;
   }
-  chain.nodes[chain.nodes.length - 1].x = 500;
+  chain.nodes[Math.floor(chain.nodes.length / 2)].y = 280;
   chain.measureTension();
   assert(chain.lastPullForce < 0.01,
     `one local segment overrun must not report whole-chain tension; got ${chain.lastPullForce}`);
@@ -604,8 +776,69 @@ function twelveEnemyBudgetTest() {
   assert(elapsed < 1000, `12-enemy simulation smoke budget exceeded: ${elapsed} ms for 120 frames`);
 }
 
+function visualDynamicsIsBoundedPresentationOnlyTest() {
+  const authority = new ChainRouteSnapshot();
+  const points = [];
+  for (let index = 0; index < ChainPerformanceBudget.targetGuideNodes; index += 1) {
+    const t = index / (ChainPerformanceBudget.targetGuideNodes - 1);
+    points.push({ x: -180 + 360 * t, y: Math.sin(t * Math.PI) * 90 });
+  }
+  authority.publish(points, [], 0.4);
+  const dynamics = new ChainVisualDynamics();
+  const visual = dynamics.update(1 / 60, authority);
+  assert(visual.points.length === ChainPerformanceBudget.visualNodes,
+    'visual chain must use the fixed low-node presentation budget');
+  near(visual.points[0].x, authority.points[0].x, 1e-9,
+    'visual start endpoint must remain pinned to the authoritative route');
+  near(visual.points[visual.points.length - 1].x, authority.points[authority.points.length - 1].x, 1e-9,
+    'visual end endpoint must remain pinned to the authoritative route');
+  const pointReferences = visual.points.slice();
+  const authorityMiddleY = authority.points[12].y;
+  points[12].y += 40;
+  authority.publish(points, [], 0.4);
+  dynamics.update(1 / 60, authority);
+  near(authority.points[12].y, authorityMiddleY + 40, 1e-9,
+    'presentation dynamics must never rewrite authoritative points');
+  assert(visual.points.every((point, index) => point === pointReferences[index]),
+    'visual dynamics must reuse its published point objects across frames');
+}
+
+function visualTensionThresholdCannotRemainStaleTest() {
+  const authority = new ChainRouteSnapshot();
+  const points = [{ x: -100, y: 0 }, { x: 100, y: 0 }];
+  const dynamics = new ChainVisualDynamics();
+  authority.publish(points, [], 0.981);
+  dynamics.update(1 / 60, authority);
+  assert(dynamics.getSnapshot().tension >= 0.98, 'fixture must publish a taut visual state');
+  authority.publish(points, [], 0.979);
+  dynamics.update(1 / 60, authority);
+  assert(dynamics.getSnapshot().tension < 0.98,
+    'crossing below full tension must publish immediately even when the numeric delta is below the sleep epsilon');
+}
+
+function visualChainSnapsWhenPlayerEndpointMovesTest() {
+  const authority = new ChainRouteSnapshot();
+  const points = [{ x: -100, y: 0 }, { x: 0, y: 70 }, { x: 100, y: 0 }];
+  const dynamics = new ChainVisualDynamics();
+  authority.publish(points, [], 0.4);
+  dynamics.update(1 / 60, authority);
+  points[2].x += 80;
+  points[2].y += 35;
+  authority.publish(points, [], 0.4);
+  const visual = dynamics.update(1 / 60, authority);
+  for (let index = 0; index < visual.points.length; index += 1) {
+    const distance = authority.totalLength * index / (visual.points.length - 1);
+    const expected = sampleRoute(authority, distance);
+    near(visual.points[index].x, expected.x, 1e-9,
+      'player endpoint movement must snap the visual chain x without inertia');
+    near(visual.points[index].y, expected.y, 1e-9,
+      'player endpoint movement must snap the visual chain y without inertia');
+  }
+}
+
 function controllerUsesOnlyTheRewritePathTest() {
   const controller = fs.readFileSync(path.join(sourceRoot, 'ChainArenaController.ts'), 'utf8');
+  const simulation = fs.readFileSync(path.join(sourceRoot, 'ChainSimulation.ts'), 'utf8');
   assert(!controller.includes("from './ChainSnareSystem'"),
     'runtime controller must not import the retired chain authority');
   assert(!controller.includes('enforceRoutedLength('),
@@ -618,13 +851,54 @@ function controllerUsesOnlyTheRewritePathTest() {
     'runtime controller must commit iron-ball-room player motion through ArenaMotionResolver');
   assert(controller.includes('this.chain.update('),
     'runtime controller must publish ChainSimulation as the gameplay/render route');
+  assert(controller.includes("from './ChainVisualDynamics'"),
+    'controller must apply the visual chain only after authoritative simulation');
+  assert(!simulation.includes('ChainVisualDynamics'),
+    'authoritative simulation must never import or consume the presentation chain');
   assert(controller.indexOf('this.resolveEnemyEnemyCollisions()') < controller.indexOf('resolveIronBallFrame('),
     'enemy peer separation must happen before the authoritative player/ball solve');
+}
+
+function presentationUsesSharedRuntimeAtlasTest() {
+  const loader = fs.readFileSync(path.join(sourceRoot, 'SpriteAssetLoader.ts'), 'utf8');
+  const chainRenderer = fs.readFileSync(path.join(sourceRoot, 'SpriteChainRenderer.ts'), 'utf8');
+  const arenaRenderer = fs.readFileSync(path.join(sourceRoot, 'ArenaSpriteRenderer.ts'), 'utf8');
+  const controller = fs.readFileSync(path.join(sourceRoot, 'ChainArenaController.ts'), 'utf8');
+  const tether = fs.readFileSync(path.join(sourceRoot, 'TetherSystem.ts'), 'utf8');
+  const arenaModel = fs.readFileSync(path.join(sourceRoot, 'ArenaModel.ts'), 'utf8');
+  assert(loader.includes('new Uint8Array(width * height * 4)'),
+    'presentation must create one bounded in-memory RGBA atlas');
+  assert(loader.includes('Texture2D.PixelFormat.RGBA8888'),
+    'runtime atlas must declare an explicit supported RGBA format');
+  assert(!loader.includes('resources.load') && !loader.includes('.svg'),
+    'runtime presentation must not depend on the broken SVG import path');
+  assert(chainRenderer.includes('snapshot.revision === this.lastRevision'),
+    'sleeping visual chain must skip unchanged sprite-pool transforms');
+  assert(chainRenderer.includes('LINK_SPACING = 14')
+    && chainRenderer.includes('LINK_WIDTH = 7')
+    && chainRenderer.includes('LINK_HEIGHT = 10')
+    && chainRenderer.includes('sprite.sizeMode = Sprite.SizeMode.CUSTOM')
+    && chainRenderer.includes('transform.setContentSize(SpriteChainRenderer.LINK_WIDTH, SpriteChainRenderer.LINK_HEIGHT)'),
+    'chain links must keep normal spacing while rendering at half icon size');
+  assert(arenaModel.includes('CHAIN_FULL_TENSION = 0.98')
+    && chainRenderer.includes('snapshot.tension >= CHAIN_FULL_TENSION'),
+    'yellow chain state must use the same full-tension threshold as automatic stun');
+  assert(tether.includes('maxLength = 317'),
+    'iron-ball chain must retain the requested one-fifth length reduction');
+  assert(arenaRenderer.includes('setPositionIfChanged'),
+    'arena sprite renderer must avoid unchanged transform writes');
+  assert(controller.includes('hudText !== this.lastHudText'),
+    'HUD must avoid rebuilding unchanged label geometry');
 }
 
 playerMotionProposalDoesNotCommitTest();
 ordinaryEnemyCannotSteerPlayerThroughChainTest();
 collisionCorrectionIsNotPlayerWrapIntentTest();
+sameDirectionTranslationIsNotPlayerWrapIntentTest();
+relativeAngleWithoutDeeperWrapIsNotIntentTest();
+straightPassWithDeepeningWrapIsNotIntentTest();
+enemyDeepeningWrapWithoutPlayerOrbitIsNotIntentTest();
+openingWrapCancelsStoredPlayerIntentTest();
 directLeashClipsOnceWithoutDirectionReversalTest();
 occupiedRouteReducesOnlyFutureOutwardAllowanceTest();
 ballAndStunCollisionAuthorityTest();
@@ -643,8 +917,14 @@ sameChainStraighteningStunsSweptEnemyTest();
 stableContactSideTest();
 automaticWrapAndTensionStunTest();
 oppositeOrbitCannotStunTest();
+inwardMotionClearsFullTensionTest();
+tautFreeChainStraightensOverTransitionTest();
 tautChainContactWithoutPlayerOrbitCannotStunTest();
 localSegmentOverrunCannotFakeFullTensionTest();
 twelveEnemyBudgetTest();
+visualDynamicsIsBoundedPresentationOnlyTest();
+visualTensionThresholdCannotRemainStaleTest();
+visualChainSnapsWhenPlayerEndpointMovesTest();
 controllerUsesOnlyTheRewritePathTest();
+presentationUsesSharedRuntimeAtlasTest();
 console.log('chain rewrite tests passed');

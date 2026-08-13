@@ -1,6 +1,9 @@
 import { Math2D, Point2D } from './Math2D';
 import { ChainPerformanceBudget } from './ChainPerformanceBudget';
 
+/** Shared gameplay/presentation threshold for a chain that is actually taut. */
+export const CHAIN_FULL_TENSION = 0.98;
+
 export interface Bounds {
   left: number;
   right: number;
