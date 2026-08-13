@@ -5,6 +5,7 @@ import { IronBallTether } from './TetherSystem';
 
 export interface ArenaMotionResult {
   playerDelta: Point2D;
+  playerDrivenDelta: Point2D;
   leashClipped: boolean;
 }
 
@@ -17,29 +18,53 @@ export interface ArenaMotionResult {
  * back into this resolver.
  */
 export class ArenaMotionResolver {
+  private readonly candidate = { x: 0, y: 0, radius: 0 };
+  private readonly fallback = { x: 0, y: 0 };
+  private readonly collisionResult = { normalX: 0, normalY: 0, penetration: 0 };
+  private readonly result: ArenaMotionResult = {
+    playerDelta: { x: 0, y: 0 },
+    playerDrivenDelta: { x: 0, y: 0 },
+    leashClipped: false,
+  };
+
   resolveIronBallFrame(
     player: PlayerState,
     ball: IronBallTether,
     enemies: readonly EnemyState[],
     bounds: Bounds,
     desiredPlayerDelta: Point2D,
+    occupiedChainLength = 0,
   ): ArenaMotionResult {
     const startX = player.x;
     const startY = player.y;
-    const candidate = {
-      x: Math2D.clamp(startX + desiredPlayerDelta.x, bounds.left + player.radius, bounds.right - player.radius),
-      y: Math2D.clamp(startY + desiredPlayerDelta.y, bounds.bottom + player.radius, bounds.top - player.radius),
-      radius: player.radius,
-    };
+    const candidate = this.candidate;
+    candidate.x = Math2D.clamp(startX + desiredPlayerDelta.x, bounds.left + player.radius, bounds.right - player.radius);
+    candidate.y = Math2D.clamp(startY + desiredPlayerDelta.y, bounds.bottom + player.radius, bounds.top - player.radius);
+    candidate.radius = player.radius;
 
     for (const enemy of enemies) {
       if (enemy.dead || !enemy.collisionEnabled) continue;
-      CircleCollisionSolver.separateMovable(candidate, enemy, 0, desiredPlayerDelta);
+      CircleCollisionSolver.separateMovable(
+        candidate,
+        enemy,
+        0,
+        desiredPlayerDelta,
+        this.collisionResult,
+        enemy.collisionSeparationScale,
+      );
       candidate.x = Math2D.clamp(candidate.x, bounds.left + player.radius, bounds.right - player.radius);
       candidate.y = Math2D.clamp(candidate.y, bounds.bottom + player.radius, bounds.top - player.radius);
     }
 
-    const leashClipped = this.clipToLeash(candidate, ball, ball.maxLength);
+    const startDistance = Math.hypot(startX - ball.x, startY - ball.y);
+    const routeAdjustedLimit = Math2D.clamp(ball.maxLength - occupiedChainLength, 1, ball.maxLength);
+    // A body moving inside the chain may reduce future outward allowance, but
+    // an ordinary body may never pull a stationary player inward. The current
+    // accepted radius is therefore the floor for this frame.
+    const movementLimit = startDistance <= ball.maxLength
+      ? Math.max(startDistance, routeAdjustedLimit)
+      : ball.maxLength;
+    const leashClipped = this.clipToLeash(candidate, ball, movementLimit);
     player.x = candidate.x;
     player.y = candidate.y;
 
@@ -48,16 +73,30 @@ export class ArenaMotionResolver {
 
     // Ball separation can move the anchor. One final radial projection keeps
     // the invariant without iterating actor corrections or adding side force.
-    const clippedAfterBodies = this.clipToLeash(player, ball, ball.maxLength);
+    const clippedAfterBodies = this.clipToLeash(player, ball, movementLimit);
     player.x = Math2D.clamp(player.x, bounds.left + player.radius, bounds.right - player.radius);
     player.y = Math2D.clamp(player.y, bounds.bottom + player.radius, bounds.top - player.radius);
 
     const distance = Math.hypot(player.x - ball.x, player.y - ball.y);
     ball.tension = Math2D.clamp((distance - ball.maxLength * 0.82) / (ball.maxLength * 0.18), 0, 1);
-    return {
-      playerDelta: { x: player.x - startX, y: player.y - startY },
-      leashClipped: leashClipped || clippedAfterBodies,
-    };
+    this.result.playerDelta.x = player.x - startX;
+    this.result.playerDelta.y = player.y - startY;
+    const desiredLength = Math.hypot(desiredPlayerDelta.x, desiredPlayerDelta.y);
+    if (desiredLength > 0.0001) {
+      const directionX = desiredPlayerDelta.x / desiredLength;
+      const directionY = desiredPlayerDelta.y / desiredLength;
+      const acceptedAlongInput = Math.max(0, Math.min(
+        desiredLength,
+        this.result.playerDelta.x * directionX + this.result.playerDelta.y * directionY,
+      ));
+      this.result.playerDrivenDelta.x = directionX * acceptedAlongInput;
+      this.result.playerDrivenDelta.y = directionY * acceptedAlongInput;
+    } else {
+      this.result.playerDrivenDelta.x = 0;
+      this.result.playerDrivenDelta.y = 0;
+    }
+    this.result.leashClipped = leashClipped || clippedAfterBodies;
+    return this.result;
   }
 
   /**
@@ -87,8 +126,12 @@ export class ArenaMotionResolver {
   }
 
   private resolveBallAgainstPlayer(ball: IronBallTether, player: PlayerState, bounds: Bounds): void {
-    const fallback = Math2D.normalize(ball.x - player.x || -player.vx, ball.y - player.y || -player.vy);
-    CircleCollisionSolver.separateMovable(ball, player, 0.18, fallback);
+    const fallback = Math2D.normalize(
+      ball.x - player.x || -player.vx,
+      ball.y - player.y || -player.vy,
+      this.fallback,
+    );
+    CircleCollisionSolver.separateMovable(ball, player, 0.18, fallback, this.collisionResult);
     this.clampBall(ball, bounds);
   }
 
@@ -99,8 +142,19 @@ export class ArenaMotionResolver {
   ): void {
     for (const enemy of enemies) {
       if (enemy.dead || !enemy.collisionEnabled) continue;
-      const fallback = Math2D.normalize(enemy.x - ball.x || -ball.vx, enemy.y - ball.y || -ball.vy);
-      const result = CircleCollisionSolver.separateMovable(enemy, ball, 0, fallback);
+      const fallback = Math2D.normalize(
+        enemy.x - ball.x || -ball.vx,
+        enemy.y - ball.y || -ball.vy,
+        this.fallback,
+      );
+      const result = CircleCollisionSolver.separateMovable(
+        enemy,
+        ball,
+        0,
+        fallback,
+        this.collisionResult,
+        enemy.collisionSeparationScale,
+      );
       if (!result) continue;
       const impactSpeed = Math.max(0, ball.vx * result.normalX + ball.vy * result.normalY);
       if (impactSpeed > 1) {

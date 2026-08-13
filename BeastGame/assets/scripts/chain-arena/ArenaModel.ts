@@ -82,7 +82,13 @@ export class PlayerState {
    * committing a world position. Chain rooms pass this proposal to the one
    * authoritative motion resolver.
    */
-  prepareMotion(dt: number, move: Point2D, aim: Point2D, dashRequested: boolean): Point2D {
+  prepareMotion(
+    dt: number,
+    move: Point2D,
+    aim: Point2D,
+    dashRequested: boolean,
+    output: Point2D = { x: 0, y: 0 },
+  ): Point2D {
     this.attackCooldown = Math.max(0, this.attackCooldown - dt);
     this.attackFlash = Math.max(0, this.attackFlash - dt);
     this.dashCooldown = Math.max(0, this.dashCooldown - dt);
@@ -95,7 +101,9 @@ export class PlayerState {
     if (this.fallTimer > 0) {
       this.vx = 0;
       this.vy = 0;
-      return { x: 0, y: 0 };
+      output.x = 0;
+      output.y = 0;
+      return output;
     }
 
     if (dashRequested && this.dashCooldown <= 0) {
@@ -110,7 +118,9 @@ export class PlayerState {
     const speed = (this.dashTimer > 0 ? 590 : 238) * TEST_ARENA_SPEED_SCALE;
     this.vx = moving.x * speed;
     this.vy = moving.y * speed;
-    return { x: this.vx * dt, y: this.vy * dt };
+    output.x = this.vx * dt;
+    output.y = this.vy * dt;
+    return output;
   }
 
   /** Legacy one-body entry point used by rooms without a motion resolver. */
@@ -150,6 +160,7 @@ export class PlayerState {
 }
 
 export class EnemyState {
+  private static readonly COLLISION_RECOVERY_DURATION = 0.18;
   x: number;
   y: number;
   tier: 1 | 2;
@@ -163,8 +174,14 @@ export class EnemyState {
   attackFlash = 0;
   snareTimer = 0;
   collisionEnabled = true;
+  collisionRecoveryTimer = 0;
   readonly canInfluenceTether: boolean;
   attackDirection: Point2D = { x: 1, y: 0 };
+  private readonly moveDirection: Point2D = { x: 0, y: 0 };
+  get collisionSeparationScale(): number {
+    if (this.collisionRecoveryTimer <= 0) return 1;
+    return Math.max(0.15, 1 - this.collisionRecoveryTimer / EnemyState.COLLISION_RECOVERY_DURATION);
+  }
   knockback: Point2D = { x: 0, y: 0 };
   dead = false;
 
@@ -184,8 +201,19 @@ export class EnemyState {
     this.ballHitCooldown = Math.max(0, this.ballHitCooldown - dt);
     this.hitFlash = Math.max(0, this.hitFlash - dt);
     this.attackFlash = Math.max(0, this.attackFlash - dt);
+    const wasSnared = this.snareTimer > 0;
     this.snareTimer = Math.max(0, this.snareTimer - dt);
-    this.collisionEnabled = !this.dead && this.snareTimer <= 0;
+    if (this.dead || this.snareTimer > 0) {
+      this.collisionEnabled = false;
+      this.collisionRecoveryTimer = EnemyState.COLLISION_RECOVERY_DURATION;
+    } else {
+      this.collisionEnabled = true;
+      if (wasSnared) {
+        this.collisionRecoveryTimer = EnemyState.COLLISION_RECOVERY_DURATION;
+        this.damageCooldown = Math.max(this.damageCooldown, EnemyState.COLLISION_RECOVERY_DURATION);
+      }
+      else this.collisionRecoveryTimer = Math.max(0, this.collisionRecoveryTimer - dt);
+    }
 
     if (Math.hypot(this.knockback.x, this.knockback.y) > 8) {
       this.x += this.knockback.x * dt;
@@ -194,8 +222,7 @@ export class EnemyState {
       this.knockback.x *= drag;
       this.knockback.y *= drag;
     } else if (this.snareTimer <= 0) {
-      const chase = Math2D.normalize(player.x - this.x, player.y - this.y);
-      this.attackDirection = chase;
+      const chase = Math2D.normalize(player.x - this.x, player.y - this.y, this.attackDirection);
       const playerDistance = Math.hypot(player.x - this.x, player.y - this.y);
       if (playerDistance > MELEE_ATTACK_RANGE + player.radius) {
         let separateX = 0;
@@ -210,7 +237,11 @@ export class EnemyState {
             separateY += dy / distance;
           }
         }
-        const direction = Math2D.normalize(chase.x + separateX * 0.35, chase.y + separateY * 0.35);
+        const direction = Math2D.normalize(
+          chase.x + separateX * 0.35,
+          chase.y + separateY * 0.35,
+          this.moveDirection,
+        );
         this.x += direction.x * this.speed * dt;
         this.y += direction.y * this.speed * dt;
       } else if (this.damageCooldown <= 0) {
@@ -246,6 +277,7 @@ export class EnemyState {
     if (this.dead) return;
     this.snareTimer = Math.max(this.snareTimer, duration);
     this.collisionEnabled = false;
+    this.collisionRecoveryTimer = EnemyState.COLLISION_RECOVERY_DURATION;
     this.damageCooldown = Math.max(this.damageCooldown, duration);
     this.hitFlash = 0.16;
   }

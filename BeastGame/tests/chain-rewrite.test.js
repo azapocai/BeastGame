@@ -38,8 +38,36 @@ function distanceToSegment(point, start, end) {
   return Math.hypot(point.x - (start.x + dx * t), point.y - (start.y + dy * t));
 }
 
+function bruteSweepHit(previous, current, circle, padding = 0) {
+  const radius = circle.radius + padding;
+  const radiusSquared = radius * radius;
+  const cross = (point, start, end) => (point.x - end.x) * (start.y - end.y)
+    - (start.x - end.x) * (point.y - end.y);
+  const insideTriangle = (point, a, b, c) => {
+    const area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+    if (Math.abs(area) <= 0.0001) return false;
+    const values = [cross(point, a, b), cross(point, b, c), cross(point, c, a)];
+    return !(values.some((value) => value < -0.0001) && values.some((value) => value > 0.0001));
+  };
+  const segmentCount = Math.min(previous.length, current.length) - 1;
+  for (let index = 0; index < segmentCount; index += 1) {
+    const oldStart = previous[index];
+    const oldEnd = previous[index + 1];
+    const newStart = current[index];
+    const newEnd = current[index + 1];
+    if (insideTriangle(circle, oldStart, oldEnd, newEnd)
+      || insideTriangle(circle, oldStart, newEnd, newStart)
+      || distanceToSegment(circle, oldStart, oldEnd) ** 2 <= radiusSquared
+      || distanceToSegment(circle, oldEnd, newEnd) ** 2 <= radiusSquared
+      || distanceToSegment(circle, newEnd, newStart) ** 2 <= radiusSquared
+      || distanceToSegment(circle, newStart, oldStart) ** 2 <= radiusSquared) return true;
+  }
+  return false;
+}
+
 const { ArenaMotionResolver } = loadModule(path.join(sourceRoot, 'ArenaMotionResolver.ts'));
 const { ChainSimulation } = loadModule(path.join(sourceRoot, 'ChainSimulation.ts'));
+const { ChainSweepHitDetector } = loadModule(path.join(sourceRoot, 'ChainSweepHitDetector.ts'));
 const { ChainPerformanceBudget } = loadModule(path.join(sourceRoot, 'ChainPerformanceBudget.ts'));
 const { EnemyState, PlayerState } = loadModule(path.join(sourceRoot, 'ArenaModel.ts'));
 const { IronBallTether } = loadModule(path.join(sourceRoot, 'TetherSystem.ts'));
@@ -76,6 +104,30 @@ function ordinaryEnemyCannotSteerPlayerThroughChainTest() {
   near(result.playerDelta.y, proposal.y, 1e-9, 'unblocked proposal must preserve requested y motion');
 }
 
+function collisionCorrectionIsNotPlayerWrapIntentTest() {
+  const player = new PlayerState();
+  player.x = 0;
+  player.y = 0;
+  const ball = new IronBallTether(player);
+  ball.x = -200;
+  ball.y = 0;
+  ball.maxLength = 396;
+  const enemy = new EnemyState({ x: 0, y: 0 });
+  const result = new ArenaMotionResolver().resolveIronBallFrame(
+    player,
+    ball,
+    [enemy],
+    bounds,
+    { x: 0, y: 0 },
+  );
+  assert(Math.hypot(result.playerDelta.x, result.playerDelta.y) > 0,
+    'fixture must physically separate an overlapping player');
+  near(result.playerDrivenDelta.x, 0, 1e-9,
+    'enemy collision correction must not create player-driven wrap x');
+  near(result.playerDrivenDelta.y, 0, 1e-9,
+    'enemy collision correction must not create player-driven wrap y');
+}
+
 function directLeashClipsOnceWithoutDirectionReversalTest() {
   const player = new PlayerState();
   player.x = 95;
@@ -97,6 +149,27 @@ function directLeashClipsOnceWithoutDirectionReversalTest() {
   assert(result.playerDelta.x >= 0, 'radial clipping must not reverse requested horizontal movement');
 }
 
+function occupiedRouteReducesOnlyFutureOutwardAllowanceTest() {
+  const player = new PlayerState();
+  player.x = 100;
+  player.y = 0;
+  const ball = new IronBallTether(player);
+  ball.x = 0;
+  ball.y = 0;
+  ball.maxLength = 200;
+  const resolver = new ArenaMotionResolver();
+  resolver.resolveIronBallFrame(player, ball, [], bounds, { x: 50, y: 0 }, 80);
+  near(player.x, 120, 1e-6, '80 occupied units must reduce the 200-unit outward allowance to 120');
+
+  player.x = 150;
+  resolver.resolveIronBallFrame(player, ball, [], bounds, { x: 0, y: 0 }, 100);
+  near(player.x, 150, 1e-6, 'new obstacle occupancy must not passively drag a stationary player inward');
+  resolver.resolveIronBallFrame(player, ball, [], bounds, { x: 20, y: 0 }, 100);
+  near(player.x, 150, 1e-6, 'player already beyond adjusted allowance must not move farther outward');
+  resolver.resolveIronBallFrame(player, ball, [], bounds, { x: -20, y: 0 }, 100);
+  near(player.x, 130, 1e-6, 'player must remain free to move inward from an occupied chain limit');
+}
+
 function ballAndStunCollisionAuthorityTest() {
   const player = new PlayerState();
   player.x = 180;
@@ -116,6 +189,27 @@ function ballAndStunCollisionAuthorityTest() {
   const beforeY = player.y;
   resolver.resolveIronBallFrame(player, ball, [stunned], bounds, { x: 0, y: 40 });
   near(player.y, beforeY + 40, 1e-6, 'stunned enemy must not block player movement');
+}
+
+function collisionRecoverySeparatesGraduallyTest() {
+  const player = new PlayerState();
+  player.x = 0;
+  player.y = 0;
+  const enemy = new EnemyState({ x: 0, y: 0 });
+  enemy.applySnare(0.01);
+  enemy.update(0.02, player, [enemy], bounds);
+  assert(enemy.collisionEnabled && enemy.collisionSeparationScale < 0.3,
+    'collision must re-enable with a low recovery strength after stun ends');
+  const ball = new IronBallTether(player);
+  ball.x = -200;
+  ball.y = 0;
+  ball.maxLength = 396;
+  new ArenaMotionResolver().resolveIronBallFrame(player, ball, [enemy], bounds, { x: 0, y: 0 });
+  const partialDistance = Math.hypot(player.x - enemy.x, player.y - enemy.y);
+  assert(partialDistance > 0 && partialDistance < player.radius + enemy.radius,
+    'first recovery frame must partially separate overlap instead of snapping to full clearance');
+  for (let frame = 0; frame < 12; frame += 1) enemy.update(1 / 60, player, [enemy], bounds);
+  assert(enemy.collisionSeparationScale === 1, 'collision recovery must reach full strength in bounded time');
 }
 
 function taggedInfluenceIsTheOnlyChainDragExceptionTest() {
@@ -222,6 +316,152 @@ function manualPullTargetsOnlyTheFirstContactTest() {
   assert(expectedSurvivor.snareTimer === 0, 'C must not bulk-stun later contacts');
 }
 
+function enclosedCandidateSharesAutomaticReleaseTest() {
+  const chain = new ChainSimulation();
+  const first = new EnemyState({ x: -30, y: 0 });
+  const second = new EnemyState({ x: 30, y: 0 });
+  const enclosed = new EnemyState({ x: 0, y: 30 });
+  chain.contacts.push(
+    { enemy: first, startNode: 3, endNode: 7, angle: Math.PI * 0.3, signedSweep: Math.PI * 0.3 },
+    { enemy: second, startNode: 9, endNode: 13, angle: Math.PI * 0.3, signedSweep: Math.PI * 0.3 },
+  );
+  chain.contactIntentTracker.beginFrame();
+  chain.contactIntentTracker.observe(first, { x: 100, y: 0 }, { x: 0, y: 0 }, Math.PI * 0.3);
+  chain.contactIntentTracker.observe(second, { x: 100, y: 0 }, { x: 0, y: 0 }, Math.PI * 0.3);
+  chain.contactIntentTracker.endFrame();
+  chain.contactIntentTracker.beginFrame();
+  chain.contactIntentTracker.observe(first, { x: 98, y: 24 }, { x: -2, y: 24 }, Math.PI * 0.3);
+  chain.contactIntentTracker.observe(second, { x: 98, y: 24 }, { x: -2, y: 24 }, Math.PI * 0.3);
+  chain.contactIntentTracker.endFrame();
+  chain.enclosureTracker.candidates.push(enclosed);
+  chain.tension = 1;
+  chain.updateStuns();
+  assert(first.snareTimer > 0 && second.snareTimer > 0,
+    'qualifying direct contacts must trigger the automatic release');
+  assert(enclosed.snareTimer > 0,
+    'enemy enclosed by the same guide loop must share the automatic release stun');
+}
+
+function realEnclosureRequiresStabilityAndSurvivesShallowContactTest() {
+  const chain = new ChainSimulation();
+  const enemy = new EnemyState({ x: 0, y: 0 });
+  chain.reset({ x: 80, y: 0 }, { x: 80, y: 0 }, 700);
+  const last = chain.nodes.length - 1;
+  for (let index = 0; index <= last; index += 1) {
+    const angle = index / last * Math.PI * 2;
+    const radius = index === Math.floor(last * 0.5) ? enemy.radius + 2 : 80;
+    const node = chain.nodes[index];
+    node.x = Math.cos(angle) * radius;
+    node.y = Math.sin(angle) * radius;
+    node.previousX = node.x;
+    node.previousY = node.y;
+  }
+  chain.rebuildContacts([enemy]);
+  assert(chain.contacts.length === 1 && chain.contacts[0].angle < Math.PI * 0.25,
+    'fixture must be enclosed while only shallowly brushing the chain');
+  assert(chain.enclosureTracker.candidates.length === 0,
+    'one-frame enclosure must not immediately qualify for a release event');
+  chain.rebuildContacts([enemy]);
+  assert(chain.enclosureTracker.candidates.includes(enemy),
+    'stable enclosure must remain eligible even when it also has a shallow contact');
+  enemy.x = 140;
+  chain.rebuildContacts([enemy]);
+  assert(!chain.enclosureTracker.candidates.includes(enemy), 'leaving the guide loop must clear enclosure eligibility');
+}
+
+function releaseSweepGeometryTest() {
+  const previous = [{ x: -100, y: 60 }, { x: 100, y: 60 }];
+  const current = [{ x: -100, y: -60 }, { x: 100, y: -60 }];
+  assert(ChainSweepHitDetector.hitsMovingPolyline(previous, current, { x: 0, y: 0, radius: 16 }, 2),
+    'enemy inside the retracting segment sweep must be hit');
+  assert(!ChainSweepHitDetector.hitsMovingPolyline(previous, current, { x: 150, y: 0, radius: 16 }, 2),
+    'enemy outside the retracting segment sweep must not be hit');
+  assert(!ChainSweepHitDetector.hitsMovingPolyline(
+    [{ x: -50, y: 0 }, { x: 50, y: 0 }],
+    [{ x: -50, y: 0 }, { x: 50, y: 0 }],
+    { x: 200, y: 0, radius: 16 },
+    2,
+  ), 'degenerate stationary sweep must not hit a collinear enemy beyond the chain');
+}
+
+function preparedSweepBroadPhaseMatchesExactResultTest() {
+  const previous = [
+    { x: -120, y: 80 },
+    { x: 0, y: 110 },
+    { x: 120, y: 70 },
+  ];
+  const current = [
+    { x: -120, y: 0 },
+    { x: 0, y: 0 },
+    { x: 120, y: 0 },
+  ];
+  const segmentBounds = [];
+  const overallBounds = { minX: 0, minY: 0, maxX: 0, maxY: 0, moving: false };
+  const count = ChainSweepHitDetector.prepareSweep(previous, current, segmentBounds, overallBounds);
+  assert(count === 2 && segmentBounds.length === 2, 'prepared sweep must use one fixed bound per chain segment');
+  const references = segmentBounds.slice();
+  const fixtures = [
+    { x: 0, y: 55, radius: 16 },
+    { x: -95, y: 42, radius: 12 },
+    { x: 170, y: 55, radius: 16 },
+    { x: 0, y: 160, radius: 10 },
+  ];
+  for (const enemy of fixtures) {
+    const prepared = ChainSweepHitDetector.circleOverlapsBounds(enemy, overallBounds, 2)
+      && ChainSweepHitDetector.hitsPreparedSweep(previous, current, segmentBounds, count, enemy, 2);
+    const direct = bruteSweepHit(previous, current, enemy, 2);
+    assert(prepared === direct, 'two-level broad phase must not change the exact sweep result');
+  }
+  assert(!ChainSweepHitDetector.circleOverlapsBounds(fixtures[2], overallBounds, 2),
+    'far enemy must be rejected by the whole-sweep AABB before segment tests');
+  ChainSweepHitDetector.prepareSweep(previous, current, segmentBounds, overallBounds);
+  assert(segmentBounds.every((bounds, index) => bounds === references[index]),
+    'prepared segment AABBs must reuse their fixed buffer objects');
+}
+
+function persistentChainCollisionBroadPhaseTest() {
+  const chain = new ChainSimulation();
+  const farEnemies = [];
+  for (let index = 0; index < ChainPerformanceBudget.maxActiveEnemies; index += 1) {
+    farEnemies.push(new EnemyState({ x: 0, y: 180 + index * 3 }));
+  }
+  chain.update(1 / 60, { x: -120, y: -100 }, { x: 120, y: -100 }, farEnemies, 396);
+  assert(chain.lastCollisionNarrowPhaseChecks === 0,
+    'whole-chain AABB must reject far enemies before segment narrow phase');
+  farEnemies[0].x = 0;
+  farEnemies[0].y = -100;
+  chain.update(1 / 60, { x: -120, y: -100 }, { x: 120, y: -100 }, farEnemies, 396);
+  assert(chain.lastCollisionNarrowPhaseChecks > 0,
+    'enemy near the chain must still enter segment narrow phase');
+  assert(chain.lastCollisionNarrowPhaseChecks < 23 * ChainPerformanceBudget.guideConstraintIterations * 2,
+    'segment AABBs must avoid testing every segment for one local enemy');
+}
+
+function sameChainStraighteningStunsSweptEnemyTest() {
+  const chain = new ChainSimulation();
+  const ball = { x: -160, y: 0 };
+  const player = { x: 160, y: 0 };
+  chain.reset(ball, player, 500);
+  for (let index = 0; index < chain.nodes.length; index += 1) {
+    const t = index / (chain.nodes.length - 1);
+    const node = chain.nodes[index];
+    node.x = ball.x + (player.x - ball.x) * t;
+    node.y = Math.sin(t * Math.PI) * 120;
+    node.previousX = node.x;
+    node.previousY = node.y;
+  }
+  const sweptEnemy = new EnemyState({ x: 0, y: 54 });
+  const outsideEnemy = new EnemyState({ x: 150, y: 150 });
+  assert(chain.triggerManualPull(), 'manual release must begin the same-node straightening event');
+  for (let frame = 0; frame < 16; frame += 1) {
+    chain.update(1 / 60, ball, player, [sweptEnemy, outsideEnemy], 500);
+  }
+  assert(sweptEnemy.snareTimer > 0,
+    'enemy crossed by the actual straightening chain must be stunned even without a 45-degree wrap');
+  assert(outsideEnemy.snareTimer === 0,
+    'same release must not stun an enemy outside the swept chain path');
+}
+
 function stableContactSideTest() {
   const chain = new ChainSimulation();
   const ball = { x: -160, y: 0 };
@@ -248,10 +488,17 @@ function automaticWrapAndTensionStunTest() {
   let maximumAngle = 0;
   let maximumTension = 0;
   for (let frame = 0; frame < 150 && enemy.snareTimer <= 0; frame += 1) {
-    const angle = Math.min(Math.PI * 0.82, frame / 90 * Math.PI * 0.82);
+    const previousX = player.x;
+    const previousY = player.y;
+    // The canonical collision route passes above the enemy, so clockwise
+    // player orbit deepens that bend. Counter-clockwise movement unwraps it.
+    const angle = -Math.min(Math.PI * 0.82, frame / 90 * Math.PI * 0.82);
     player.x = Math.cos(angle) * 190;
     player.y = Math.sin(angle) * 190;
-    chain.update(1 / 60, ball, player, [enemy], 390);
+    chain.update(1 / 60, ball, player, [enemy], 390, {
+      x: player.x - previousX,
+      y: player.y - previousY,
+    });
     maximumAngle = Math.max(maximumAngle, chain.totalContactAngle);
     maximumTension = Math.max(maximumTension, chain.lastPullForce);
   }
@@ -268,6 +515,55 @@ function automaticWrapAndTensionStunTest() {
   ));
   assert(afterDeviation < beforeDeviation * 0.7,
     'automatic stun must straighten the existing node chain instead of leaving the wrap frozen');
+}
+
+function oppositeOrbitCannotStunTest() {
+  const chain = new ChainSimulation();
+  const ball = { x: -190, y: 0 };
+  const player = { x: 190, y: 0 };
+  const enemy = new EnemyState({ x: 0, y: 0 });
+  let maximumAngle = 0;
+  let maximumTension = 0;
+  for (let frame = 0; frame < 150; frame += 1) {
+    const previousX = player.x;
+    const previousY = player.y;
+    const angle = Math.min(Math.PI * 0.82, frame / 90 * Math.PI * 0.82);
+    player.x = Math.cos(angle) * 190;
+    player.y = Math.sin(angle) * 190;
+    chain.update(1 / 60, ball, player, [enemy], 390, {
+      x: player.x - previousX,
+      y: player.y - previousY,
+    });
+    maximumAngle = Math.max(maximumAngle, chain.totalContactAngle);
+    maximumTension = Math.max(maximumTension, chain.lastPullForce);
+  }
+  assert(maximumAngle >= Math.PI * 0.25,
+    'opposite-direction fixture must still produce a visible bend above 45 degrees');
+  assert(maximumTension >= 0.98,
+    'opposite-direction fixture must still pull the chain to full tension');
+  assert(enemy.snareTimer === 0,
+    'moving against the signed contact bend must unwrap it, never trigger an automatic stun');
+}
+
+function tautChainContactWithoutPlayerOrbitCannotStunTest() {
+  const chain = new ChainSimulation();
+  const ball = { x: -198, y: 0 };
+  const player = { x: 198, y: 0 };
+  const enemy = new EnemyState({ x: 0, y: 70 });
+  let maximumAngle = 0;
+  let maximumTension = 0;
+  for (let frame = 0; frame < 120; frame += 1) {
+    enemy.y = Math.max(0, enemy.y - 3);
+    chain.update(1 / 60, ball, player, [enemy], 396, { x: 0, y: 0 });
+    maximumAngle = Math.max(maximumAngle, chain.totalContactAngle);
+    maximumTension = Math.max(maximumTension, chain.lastPullForce);
+  }
+  assert(maximumAngle >= Math.PI * 0.25,
+    `fixture must produce a collision fold above 45 degrees; got ${maximumAngle * 180 / Math.PI}`);
+  assert(maximumTension >= 0.98,
+    `fixture must keep the chain fully taut; got ${maximumTension}`);
+  assert(enemy.snareTimer === 0,
+    'enemy moving into an already taut chain must not be stunned without player-driven orbit');
 }
 
 function localSegmentOverrunCannotFakeFullTensionTest() {
@@ -322,19 +618,32 @@ function controllerUsesOnlyTheRewritePathTest() {
     'runtime controller must commit iron-ball-room player motion through ArenaMotionResolver');
   assert(controller.includes('this.chain.update('),
     'runtime controller must publish ChainSimulation as the gameplay/render route');
+  assert(controller.indexOf('this.resolveEnemyEnemyCollisions()') < controller.indexOf('resolveIronBallFrame('),
+    'enemy peer separation must happen before the authoritative player/ball solve');
 }
 
 playerMotionProposalDoesNotCommitTest();
 ordinaryEnemyCannotSteerPlayerThroughChainTest();
+collisionCorrectionIsNotPlayerWrapIntentTest();
 directLeashClipsOnceWithoutDirectionReversalTest();
+occupiedRouteReducesOnlyFutureOutwardAllowanceTest();
 ballAndStunCollisionAuthorityTest();
+collisionRecoverySeparatesGraduallyTest();
 taggedInfluenceIsTheOnlyChainDragExceptionTest();
 authoritativeRouteAndManualPullTest();
 noContactManualPullStraightensSameNodesTest();
 orderedBoundedMultiContactTest();
 manualPullTargetsOnlyTheFirstContactTest();
+enclosedCandidateSharesAutomaticReleaseTest();
+realEnclosureRequiresStabilityAndSurvivesShallowContactTest();
+releaseSweepGeometryTest();
+preparedSweepBroadPhaseMatchesExactResultTest();
+persistentChainCollisionBroadPhaseTest();
+sameChainStraighteningStunsSweptEnemyTest();
 stableContactSideTest();
 automaticWrapAndTensionStunTest();
+oppositeOrbitCannotStunTest();
+tautChainContactWithoutPlayerOrbitCannotStunTest();
 localSegmentOverrunCannotFakeFullTensionTest();
 twelveEnemyBudgetTest();
 controllerUsesOnlyTheRewritePathTest();

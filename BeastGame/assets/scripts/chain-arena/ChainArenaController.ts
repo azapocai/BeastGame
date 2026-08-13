@@ -26,6 +26,35 @@ interface ExplosionEffect {
 const LOGICAL_WIDTH = 960;
 const LOGICAL_HEIGHT = 600;
 const BOUNDS: Bounds = { left: -446, right: 446, bottom: -258, top: 258 };
+const PEER_FALLBACK_X = Object.freeze({ x: 1, y: 0 });
+const PEER_FALLBACK_Y = Object.freeze({ x: 0, y: 1 });
+const DRAW_COLORS = Object.freeze({
+  arena: new Color(218, 205, 177),
+  grid: new Color(111, 85, 57, 50),
+  border: new Color(93, 71, 49),
+  attack: new Color(255, 209, 118, 96),
+  playerHit: new Color(255, 244, 222),
+  player: new Color(45, 143, 152),
+  playerStroke: new Color(23, 61, 68),
+  aim: new Color(233, 216, 180),
+  fall: new Color(238, 109, 75, 210),
+  enemyAttack: new Color(202, 68, 48, 64),
+  enemyHit: new Color(255, 240, 222),
+  enemyStunned: new Color(91, 101, 188),
+  enemyHeavy: new Color(116, 46, 43),
+  enemy: new Color(173, 73, 55),
+  enemyStroke: new Color(75, 32, 28),
+  heavyAccent: new Color(213, 178, 118),
+  influence: new Color(231, 172, 63, 230),
+  healthBack: new Color(64, 38, 30, 150),
+  health: new Color(212, 83, 61),
+  barrel: new Color(141, 58, 39),
+  barrelStroke: new Color(62, 36, 25),
+  barrelBand: new Color(208, 155, 74),
+  touchStroke: new Color(56, 44, 33, 110),
+  touchKnob: new Color(213, 161, 88, 140),
+  touchButton: new Color(73, 55, 38, 45),
+});
 
 /** Owns the arena simulation, presentation, and room flow. */
 @ccclass('ChainArenaController')
@@ -38,6 +67,13 @@ export class ChainArenaController extends Component {
   private status!: Label;
   private help!: Label;
   private input = new InputRouter();
+  private readonly desiredPlayerMotion = { x: 0, y: 0 };
+  private readonly influencerMotion = { x: 0, y: 0 };
+  private readonly chainPlayerMotion = { x: 0, y: 0 };
+  private readonly tempDirection = { x: 0, y: 0 };
+  private readonly peerCollisionResult = { normalX: 0, normalY: 0, penetration: 0 };
+  private readonly explodeBarrelHandler = (barrel: BarrelState): void => this.explodeBarrel(barrel);
+  private readonly explosionColor = new Color(241, 138, 48, 180);
 
   private roomIndex = 0;
   private player = new PlayerState();
@@ -77,8 +113,14 @@ export class ChainArenaController extends Component {
       if (this.stateTimer <= 0) this.loadRoom(this.roomIndex + 1);
     }
 
-    for (const effect of this.effects) effect.age += dt;
-    this.effects = this.effects.filter((effect) => effect.age < effect.duration);
+    let liveEffectCount = 0;
+    for (const effect of this.effects) {
+      effect.age += dt;
+      if (effect.age >= effect.duration) continue;
+      this.effects[liveEffectCount] = effect;
+      liveEffectCount += 1;
+    }
+    this.effects.length = liveEffectCount;
     this.shake = Math.max(0, this.shake - dt * 34);
     this.draw();
   }
@@ -153,9 +195,10 @@ export class ChainArenaController extends Component {
     const previousInfluencer = this.chain.influencingEnemy;
     const influencerStartX = previousInfluencer?.x || 0;
     const influencerStartY = previousInfluencer?.y || 0;
-    let desiredPlayerMotion = { x: 0, y: 0 };
+    this.chainPlayerMotion.x = 0;
+    this.chainPlayerMotion.y = 0;
     if (this.ironBall) {
-      desiredPlayerMotion = this.player.prepareMotion(dt, move, aim, dashRequested);
+      this.player.prepareMotion(dt, move, aim, dashRequested, this.desiredPlayerMotion);
       this.ironBall.integrate(dt, BOUNDS);
     } else {
       this.player.update(dt, move, aim, dashRequested, BOUNDS);
@@ -167,30 +210,44 @@ export class ChainArenaController extends Component {
     }
     if (attackRequested && this.player.tryAttack()) this.resolvePlayerAttack();
     for (const enemy of this.enemies) if (!enemy.dead) enemy.update(dt, this.player, this.enemies, BOUNDS);
+    // Settle enemy peers before the authoritative endpoint solve. No later
+    // peer pass may push a body back into the accepted player/ball pose.
+    for (let iteration = 0; iteration < 2; iteration += 1) this.resolveEnemyEnemyCollisions();
     if (this.ironBall) {
-      this.ironBall.applyHits(this.enemies, this.barrels, this.explodeBarrel.bind(this));
-      this.motionResolver.resolveIronBallFrame(
+      this.ironBall.applyHits(this.enemies, this.barrels, this.explodeBarrelHandler);
+      const motionResult = this.motionResolver.resolveIronBallFrame(
         this.player,
         this.ironBall,
         this.enemies,
         BOUNDS,
-        desiredPlayerMotion,
+        this.desiredPlayerMotion,
+        this.chain.occupiedLength,
       );
+      this.chainPlayerMotion.x = motionResult.playerDrivenDelta.x;
+      this.chainPlayerMotion.y = motionResult.playerDrivenDelta.y;
       if (previousInfluencer) {
+        this.influencerMotion.x = previousInfluencer.x - influencerStartX;
+        this.influencerMotion.y = previousInfluencer.y - influencerStartY;
         this.motionResolver.applyTaggedTetherInfluence(
           this.player,
           this.ironBall,
           previousInfluencer,
-          { x: previousInfluencer.x - influencerStartX, y: previousInfluencer.y - influencerStartY },
+          this.influencerMotion,
           BOUNDS,
         );
       }
     }
-    if (this.turntable) this.turntable.applyHits(this.enemies, this.barrels, this.explodeBarrel.bind(this));
-    for (let iteration = 0; iteration < 2; iteration += 1) this.resolveEnemyEnemyCollisions();
+    if (this.turntable) this.turntable.applyHits(this.enemies, this.barrels, this.explodeBarrelHandler);
 
     if (this.ironBall) {
-      this.chain.update(dt, this.ironBall, this.player, this.enemies, this.ironBall.maxLength);
+      this.chain.update(
+        dt,
+        this.ironBall,
+        this.player,
+        this.enemies,
+        this.ironBall.maxLength,
+        this.chainPlayerMotion,
+      );
     } else if (this.turntable) {
       const anchor = this.turntable.getAnchorPosition();
       this.chain.update(dt, anchor, this.player, this.enemies, this.turntable.maxLength);
@@ -202,7 +259,14 @@ export class ChainArenaController extends Component {
       return;
     }
 
-    if (this.enemies.every((enemy) => enemy.dead)) {
+    let allEnemiesDead = true;
+    for (const enemy of this.enemies) {
+      if (!enemy.dead) {
+        allEnemiesDead = false;
+        break;
+      }
+    }
+    if (allEnemiesDead) {
       if (this.roomIndex < ROOM_DEFINITIONS.length - 1) {
         this.state = 'transition';
         this.stateTimer = 1.2;
@@ -219,7 +283,7 @@ export class ChainArenaController extends Component {
       const dy = enemy.y - this.player.y;
       const distance = Math.hypot(dx, dy);
       if (distance > MELEE_ATTACK_RANGE + enemy.radius) continue;
-      const direction = Math2D.normalize(dx, dy);
+      const direction = Math2D.normalize(dx, dy, this.tempDirection);
       if (Math2D.dot(direction.x, direction.y, this.player.aim.x, this.player.aim.y) < 0.22) continue;
       enemy.damage(1, direction.x * 225, direction.y * 225);
     }
@@ -228,7 +292,7 @@ export class ChainArenaController extends Component {
       const dx = barrel.x - this.player.x;
       const dy = barrel.y - this.player.y;
       const distance = Math.hypot(dx, dy);
-      const direction = Math2D.normalize(dx, dy);
+      const direction = Math2D.normalize(dx, dy, this.tempDirection);
       if (distance < 72 && Math2D.dot(direction.x, direction.y, this.player.aim.x, this.player.aim.y) > 0.3) {
         this.explodeBarrel(barrel);
       }
@@ -246,12 +310,16 @@ export class ChainArenaController extends Component {
       const dy = enemy.y - barrel.y;
       const distance = Math.hypot(dx, dy);
       if (distance > 120) continue;
-      const direction = Math2D.normalize(dx, dy);
+      const direction = Math2D.normalize(dx, dy, this.tempDirection);
       enemy.damage(3, direction.x * 430, direction.y * 430);
     }
     const playerDistance = Math.hypot(this.player.x - barrel.x, this.player.y - barrel.y);
     if (playerDistance < 92) {
-      const direction = Math2D.normalize(this.player.x - barrel.x, this.player.y - barrel.y);
+      const direction = Math2D.normalize(
+        this.player.x - barrel.x,
+        this.player.y - barrel.y,
+        this.tempDirection,
+      );
       this.player.damage(18, direction.x * 35, direction.y * 35);
     }
   }
@@ -263,8 +331,15 @@ export class ChainArenaController extends Component {
       for (let secondIndex = firstIndex + 1; secondIndex < this.enemies.length; secondIndex += 1) {
         const second = this.enemies[secondIndex];
         if (second.dead || !second.collisionEnabled) continue;
-        const fallback = (firstIndex + secondIndex) % 2 === 0 ? { x: 1, y: 0 } : { x: 0, y: 1 };
-        if (!CircleCollisionSolver.separatePair(first, second, fallback)) continue;
+        const fallback = (firstIndex + secondIndex) % 2 === 0 ? PEER_FALLBACK_X : PEER_FALLBACK_Y;
+        const recoveryScale = Math.min(first.collisionSeparationScale, second.collisionSeparationScale);
+        if (!CircleCollisionSolver.separatePair(
+          first,
+          second,
+          fallback,
+          recoveryScale,
+          this.peerCollisionResult,
+        )) continue;
         first.x = Math2D.clamp(first.x, BOUNDS.left + first.radius, BOUNDS.right - first.radius);
         first.y = Math2D.clamp(first.y, BOUNDS.bottom + first.radius, BOUNDS.top - first.radius);
         second.x = Math2D.clamp(second.x, BOUNDS.left + second.radius, BOUNDS.right - second.radius);
@@ -280,14 +355,8 @@ export class ChainArenaController extends Component {
     const shakeY = this.shake ? (Math.random() - 0.5) * this.shake : 0;
     this.staticRenderer.setPosition(shakeX, shakeY, 0);
     if (this.turntable) TetherRenderer.drawTurntable(g, this.turntable, shakeX, shakeY);
-    if (this.ironBall) {
+    if (this.ironBall || this.turntable) {
       const links = this.spriteChain.render(this.chain.getRouteSnapshot(), shakeX, shakeY);
-      this.chain.setVisibleLinkCount(links);
-      if (links === 0) TetherRenderer.drawChainSnapshot(g, this.chain.getRouteSnapshot(), shakeX, shakeY);
-    }
-    if (this.turntable) {
-      const links = this.spriteChain.render(this.chain.getRouteSnapshot(), shakeX, shakeY);
-      this.chain.setVisibleLinkCount(links);
       if (links === 0) TetherRenderer.drawChainSnapshot(g, this.chain.getRouteSnapshot(), shakeX, shakeY);
     }
     for (const barrel of this.barrels) this.drawBarrel(g, barrel, shakeX, shakeY);
@@ -306,10 +375,10 @@ export class ChainArenaController extends Component {
   }
 
   private drawArena(g: Graphics, ox: number, oy: number): void {
-    g.fillColor = new Color(218, 205, 177);
+    g.fillColor = DRAW_COLORS.arena;
     g.rect(-480 + ox, -300 + oy, LOGICAL_WIDTH, LOGICAL_HEIGHT);
     g.fill();
-    g.strokeColor = new Color(111, 85, 57, 50);
+    g.strokeColor = DRAW_COLORS.grid;
     g.lineWidth = 1;
     for (let x = -410; x < 430; x += 72) {
       g.moveTo(x + ox, BOUNDS.bottom + oy);
@@ -321,7 +390,7 @@ export class ChainArenaController extends Component {
       g.lineTo(BOUNDS.right + ox, y + 12 + oy);
       g.stroke();
     }
-    g.strokeColor = new Color(93, 71, 49);
+    g.strokeColor = DRAW_COLORS.border;
     g.lineWidth = 12;
     g.rect(BOUNDS.left + ox, BOUNDS.bottom + oy, BOUNDS.right - BOUNDS.left, BOUNDS.top - BOUNDS.bottom);
     g.stroke();
@@ -331,25 +400,25 @@ export class ChainArenaController extends Component {
     const player = this.player;
     if (player.attackFlash > 0) {
       const angle = Math.atan2(player.aim.y, player.aim.x);
-      g.fillColor = new Color(255, 209, 118, 96);
+      g.fillColor = DRAW_COLORS.attack;
       g.moveTo(player.x + ox, player.y + oy);
       g.arc(player.x + ox, player.y + oy, 68, angle - 0.72, angle + 0.72, false);
       g.close();
       g.fill();
     }
-    g.fillColor = player.hitFlash > 0 ? new Color(255, 244, 222) : new Color(45, 143, 152);
-    g.strokeColor = new Color(23, 61, 68);
+    g.fillColor = player.hitFlash > 0 ? DRAW_COLORS.playerHit : DRAW_COLORS.player;
+    g.strokeColor = DRAW_COLORS.playerStroke;
     g.lineWidth = 4;
     g.circle(player.x + ox, player.y + oy, player.radius);
     g.fill();
     g.stroke();
-    g.strokeColor = new Color(233, 216, 180);
+    g.strokeColor = DRAW_COLORS.aim;
     g.lineWidth = 8;
     g.moveTo(player.x + ox, player.y + oy);
     g.lineTo(player.x + player.aim.x * 26 + ox, player.y + player.aim.y * 26 + oy);
     g.stroke();
     if (player.fallTimer > 0) {
-      g.strokeColor = new Color(238, 109, 75, 210);
+      g.strokeColor = DRAW_COLORS.fall;
       g.lineWidth = 3;
       g.moveTo(player.x - 25 + ox, player.y - 25 + oy);
       g.lineTo(player.x - 14 + ox, player.y - 14 + oy);
@@ -362,31 +431,31 @@ export class ChainArenaController extends Component {
   private drawEnemy(g: Graphics, enemy: EnemyState, ox: number, oy: number): void {
     if (enemy.attackFlash > 0) {
       const angle = Math.atan2(enemy.attackDirection.y, enemy.attackDirection.x);
-      g.fillColor = new Color(202, 68, 48, 64);
+      g.fillColor = DRAW_COLORS.enemyAttack;
       g.moveTo(enemy.x + ox, enemy.y + oy);
       g.arc(enemy.x + ox, enemy.y + oy, MELEE_ATTACK_RANGE, angle - 0.62, angle + 0.62, false);
       g.close();
       g.fill();
     }
     g.fillColor = enemy.hitFlash > 0
-      ? new Color(255, 240, 222)
+      ? DRAW_COLORS.enemyHit
       : enemy.snareTimer > 0
-        ? new Color(91, 101, 188)
-        : enemy.tier === 2 ? new Color(116, 46, 43) : new Color(173, 73, 55);
-    g.strokeColor = new Color(75, 32, 28);
+        ? DRAW_COLORS.enemyStunned
+        : enemy.tier === 2 ? DRAW_COLORS.enemyHeavy : DRAW_COLORS.enemy;
+    g.strokeColor = DRAW_COLORS.enemyStroke;
     g.lineWidth = 4;
     g.circle(enemy.x + ox, enemy.y + oy, enemy.radius);
     g.fill();
     g.stroke();
     if (enemy.tier === 2) {
-      g.strokeColor = new Color(213, 178, 118);
+      g.strokeColor = DRAW_COLORS.heavyAccent;
       g.lineWidth = 5;
       g.arc(enemy.x + ox, enemy.y + oy, enemy.radius - 6, Math.PI * 0.15, Math.PI * 1.85, false);
       g.stroke();
     }
     if (enemy.canInfluenceTether) {
       const markerY = enemy.y + enemy.radius + 24;
-      g.fillColor = new Color(231, 172, 63, 230);
+      g.fillColor = DRAW_COLORS.influence;
       g.moveTo(enemy.x + ox, markerY + 7 + oy);
       g.lineTo(enemy.x + 7 + ox, markerY + oy);
       g.lineTo(enemy.x + ox, markerY - 7 + oy);
@@ -394,23 +463,23 @@ export class ChainArenaController extends Component {
       g.close();
       g.fill();
     }
-    g.fillColor = new Color(64, 38, 30, 150);
+    g.fillColor = DRAW_COLORS.healthBack;
     g.rect(enemy.x - 19 + ox, enemy.y + enemy.radius + 10 + oy, 38, 5);
     g.fill();
-    g.fillColor = new Color(212, 83, 61);
+    g.fillColor = DRAW_COLORS.health;
     g.rect(enemy.x - 19 + ox, enemy.y + enemy.radius + 10 + oy, 38 * Math.max(0, enemy.health / enemy.maxHealth), 5);
     g.fill();
   }
 
   private drawBarrel(g: Graphics, barrel: BarrelState, ox: number, oy: number): void {
     if (barrel.exploded) return;
-    g.fillColor = new Color(141, 58, 39);
-    g.strokeColor = new Color(62, 36, 25);
+    g.fillColor = DRAW_COLORS.barrel;
+    g.strokeColor = DRAW_COLORS.barrelStroke;
     g.lineWidth = 4;
     g.roundRect(barrel.x - 15 + ox, barrel.y - 20 + oy, 30, 40, 6);
     g.fill();
     g.stroke();
-    g.strokeColor = new Color(208, 155, 74);
+    g.strokeColor = DRAW_COLORS.barrelBand;
     g.lineWidth = 3;
     g.moveTo(barrel.x - 14 + ox, barrel.y - 9 + oy);
     g.lineTo(barrel.x + 14 + ox, barrel.y - 9 + oy);
@@ -422,7 +491,8 @@ export class ChainArenaController extends Component {
   private drawEffects(g: Graphics, ox: number, oy: number): void {
     for (const effect of this.effects) {
       const t = effect.age / effect.duration;
-      g.fillColor = new Color(241, 138, 48, Math.round((1 - t) * 180));
+      this.explosionColor.a = Math.round((1 - t) * 180);
+      g.fillColor = this.explosionColor;
       g.circle(effect.x + ox, effect.y + oy, effect.radius * (0.2 + t * 0.8));
       g.fill();
     }
@@ -431,17 +501,21 @@ export class ChainArenaController extends Component {
   private drawTouchHints(g: Graphics): void {
     const stick = this.input.getJoystick();
     if (stick.active) {
-      g.strokeColor = new Color(56, 44, 33, 110);
+      g.strokeColor = DRAW_COLORS.touchStroke;
       g.lineWidth = 4;
       g.circle(stick.origin.x, stick.origin.y, 54);
       g.stroke();
-      const offset = Math2D.normalize(stick.position.x - stick.origin.x, stick.position.y - stick.origin.y);
+      const offset = Math2D.normalize(
+        stick.position.x - stick.origin.x,
+        stick.position.y - stick.origin.y,
+        this.tempDirection,
+      );
       const distance = Math.min(46, Math.hypot(stick.position.x - stick.origin.x, stick.position.y - stick.origin.y));
-      g.fillColor = new Color(213, 161, 88, 140);
+      g.fillColor = DRAW_COLORS.touchKnob;
       g.circle(stick.origin.x + offset.x * distance, stick.origin.y + offset.y * distance, 22);
       g.fill();
     }
-    g.fillColor = new Color(73, 55, 38, 45);
+    g.fillColor = DRAW_COLORS.touchButton;
     g.roundRect(355, -240, 72, 48, 9);
     g.fill();
     g.roundRect(355, -184, 72, 48, 9);
@@ -450,7 +524,8 @@ export class ChainArenaController extends Component {
 
   private updateLabels(): void {
     const room = ROOM_DEFINITIONS[this.roomIndex];
-    const remaining = this.enemies.filter((enemy) => !enemy.dead).length;
+    let remaining = 0;
+    for (const enemy of this.enemies) if (!enemy.dead) remaining += 1;
     this.hud.string = `${room.name}\n${room.subtitle}\n敌人 ${remaining}  ·  生命 ${Math.ceil(this.player.health)}`;
     if (this.state === 'transition') this.status.string = `房间通过 · 即将进入 ${ROOM_DEFINITIONS[this.roomIndex + 1].name}`;
     else if (this.state === 'lost') this.status.string = '挑战失败 · 按 R 重新开始';

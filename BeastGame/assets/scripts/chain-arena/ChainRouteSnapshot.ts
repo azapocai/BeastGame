@@ -13,7 +13,7 @@ export interface RouteContactRange {
 }
 
 /**
- * Reusable, frame-local route published by ChainSnareSystem.
+ * Reusable, frame-local route published by ChainSimulation.
  *
  * Consumers must treat this object as read-only. Its backing arrays are reused
  * on the next logic frame so the hot path does not allocate route objects.

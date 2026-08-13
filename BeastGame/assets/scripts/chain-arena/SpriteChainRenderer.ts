@@ -16,6 +16,7 @@ export class SpriteChainRenderer {
   private readonly links: Sprite[] = [];
   private readonly slackColor = new Color(113, 106, 95);
   private readonly tenseColor = new Color(240, 194, 107);
+  private readonly sampleResult = { x: 0, y: 0, dx: 0, dy: 0 };
   private spriteFrame: SpriteFrame | null = null;
   private loaded = false;
   private loadError = '';
@@ -59,7 +60,7 @@ export class SpriteChainRenderer {
       sprite.node.active = visible;
       if (!visible) continue;
       const distance = snapshot.totalLength * (index + 0.5) / linkCount;
-      const sample = this.sample(snapshot, distance);
+      const sample = this.sample(snapshot, distance, this.sampleResult);
       const targetRoot = this.isContactDistance(snapshot, distance) ? this.frontRoot : this.backRoot;
       if (sprite.node.parent !== targetRoot) sprite.node.setParent(targetRoot);
       sprite.node.setPosition(sample.x + ox, sample.y + oy, 0);
@@ -126,7 +127,11 @@ export class SpriteChainRenderer {
     for (const link of this.links) link.node.active = false;
   }
 
-  private sample(snapshot: ChainRouteSnapshot, distance: number): { x: number; y: number; dx: number; dy: number } {
+  private sample(
+    snapshot: ChainRouteSnapshot,
+    distance: number,
+    output: { x: number; y: number; dx: number; dy: number },
+  ): { x: number; y: number; dx: number; dy: number } {
     const lengths = snapshot.cumulativeLengths;
     let segment = 0;
     while (segment < lengths.length - 2 && lengths[segment + 1] < distance) segment += 1;
@@ -134,12 +139,11 @@ export class SpriteChainRenderer {
     const end = snapshot.points[segment + 1];
     const segmentLength = Math.max(0.0001, lengths[segment + 1] - lengths[segment]);
     const t = Math.max(0, Math.min(1, (distance - lengths[segment]) / segmentLength));
-    return {
-      x: start.x + (end.x - start.x) * t,
-      y: start.y + (end.y - start.y) * t,
-      dx: end.x - start.x,
-      dy: end.y - start.y,
-    };
+    output.x = start.x + (end.x - start.x) * t;
+    output.y = start.y + (end.y - start.y) * t;
+    output.dx = end.x - start.x;
+    output.dy = end.y - start.y;
+    return output;
   }
 
   private isContactDistance(snapshot: ChainRouteSnapshot, distance: number): boolean {

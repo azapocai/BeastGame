@@ -15,16 +15,6 @@ export interface TetherAnchorProvider {
   getAnchorPosition(): Point2D;
 }
 
-export class FixedAnchor implements TetherAnchorProvider {
-  readonly kind = 'fixed' as const;
-
-  constructor(public x: number, public y: number) {}
-
-  getAnchorPosition(): Point2D {
-    return { x: this.x, y: this.y };
-  }
-}
-
 /** Two-body custom tether used by the iron-ball room. */
 export class IronBallTether implements TetherAnchorProvider {
   readonly kind = 'iron-ball' as const;
@@ -78,7 +68,7 @@ export class IronBallTether implements TetherAnchorProvider {
     this.lastSpeed = Math.hypot(this.vx, this.vy);
   }
 
-  /** Legacy coupled entry point retained for non-refactored callers. */
+  /** @deprecated Historical-test compatibility; runtime uses ArenaMotionResolver. */
   update(dt: number, player: PlayerState, bounds: Bounds): void {
     this.integrate(dt, bounds);
     let dx = player.x - this.x;
@@ -127,12 +117,7 @@ export class IronBallTether implements TetherAnchorProvider {
     }
   }
 
-  /**
-   * Keeps the iron ball solid without allowing ordinary enemies to steer the
-   * tether. The player is authoritative over the ball; the ball is
-   * authoritative over ordinary enemies. Stunned enemies opt out through
-   * their collision flag.
-   */
+  /** @deprecated Historical-test compatibility; runtime uses ArenaMotionResolver. */
   resolveBodyCollisions(player: PlayerState, enemies: EnemyState[], bounds: Bounds): boolean {
     let collided = false;
     const playerFallback = Math2D.normalize(this.vx || this.x - player.x, this.vy || this.y - player.y);
@@ -171,6 +156,7 @@ export class IronBallTether implements TetherAnchorProvider {
     player.x = this.x + dx / distance * this.maxLength;
     player.y = this.y + dy / distance * this.maxLength;
   }
+
 }
 
 /**

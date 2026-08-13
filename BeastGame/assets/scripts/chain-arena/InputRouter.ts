@@ -23,6 +23,16 @@ export class InputRouter {
   private restartQueued = false;
   private debugQueued = false;
   private lastMove: Point2D = { x: 0, y: 1 };
+  private readonly moveOutput: Point2D = { x: 0, y: 0 };
+  private readonly aimOutput: Point2D = { x: 0, y: 1 };
+  private readonly actions: FrameActions = {
+    attack: false, dash: false, pullTether: false, restart: false, toggleDebug: false,
+  };
+  private readonly joystickSnapshot = {
+    active: false,
+    origin: this.joystickOrigin,
+    position: this.joystickPosition,
+  };
 
   enable(): void {
     input.on(Input.EventType.KEY_DOWN, this.onKeyDown, this);
@@ -50,50 +60,54 @@ export class InputRouter {
   getMove(): Point2D {
     let x = 0;
     let y = 0;
-    if (this.has(KeyCode.KEY_A, KeyCode.ARROW_LEFT)) x -= 1;
-    if (this.has(KeyCode.KEY_D, KeyCode.ARROW_RIGHT)) x += 1;
-    if (this.has(KeyCode.KEY_W, KeyCode.ARROW_UP)) y += 1;
-    if (this.has(KeyCode.KEY_S, KeyCode.ARROW_DOWN)) y -= 1;
+    if (this.hasEither(KeyCode.KEY_A, KeyCode.ARROW_LEFT)) x -= 1;
+    if (this.hasEither(KeyCode.KEY_D, KeyCode.ARROW_RIGHT)) x += 1;
+    if (this.hasEither(KeyCode.KEY_W, KeyCode.ARROW_UP)) y += 1;
+    if (this.hasEither(KeyCode.KEY_S, KeyCode.ARROW_DOWN)) y -= 1;
 
     if (this.joystickId !== null) {
       x += (this.joystickPosition.x - this.joystickOrigin.x) / 54;
       y += (this.joystickPosition.y - this.joystickOrigin.y) / 54;
     }
-    const direction = Math2D.normalize(x, y);
-    if (direction.x || direction.y) this.lastMove = direction;
-    return direction;
+    Math2D.normalize(x, y, this.moveOutput);
+    if (this.moveOutput.x || this.moveOutput.y) {
+      this.lastMove.x = this.moveOutput.x;
+      this.lastMove.y = this.moveOutput.y;
+    }
+    return this.moveOutput;
   }
 
   getAim(player: Point2D): Point2D {
     if (this.pointerActive) {
-      const aim = Math2D.normalize(this.pointer.x - player.x, this.pointer.y - player.y);
-      if (aim.x || aim.y) return aim;
+      Math2D.normalize(this.pointer.x - player.x, this.pointer.y - player.y, this.aimOutput);
+      if (this.aimOutput.x || this.aimOutput.y) return this.aimOutput;
     }
     return this.lastMove;
   }
 
   consumeActions(): FrameActions {
-    const actions = {
-      attack: this.attackQueued,
-      dash: this.dashQueued,
-      pullTether: this.pullTetherQueued,
-      restart: this.restartQueued,
-      toggleDebug: this.debugQueued,
-    };
+    this.actions.attack = this.attackQueued;
+    this.actions.dash = this.dashQueued;
+    this.actions.pullTether = this.pullTetherQueued;
+    this.actions.restart = this.restartQueued;
+    this.actions.toggleDebug = this.debugQueued;
     this.attackQueued = false;
     this.dashQueued = false;
     this.pullTetherQueued = false;
     this.restartQueued = false;
     this.debugQueued = false;
-    return actions;
+    return this.actions;
   }
 
   getJoystick(): { active: boolean; origin: Point2D; position: Point2D } {
-    return { active: this.joystickId !== null, origin: this.joystickOrigin, position: this.joystickPosition };
+    this.joystickSnapshot.active = this.joystickId !== null;
+    this.joystickSnapshot.origin = this.joystickOrigin;
+    this.joystickSnapshot.position = this.joystickPosition;
+    return this.joystickSnapshot;
   }
 
-  private has(...codes: KeyCode[]): boolean {
-    return codes.some((code) => this.keys.has(code));
+  private hasEither(first: KeyCode, second: KeyCode): boolean {
+    return this.keys.has(first) || this.keys.has(second);
   }
 
   private onKeyDown(event: EventKeyboard): void {

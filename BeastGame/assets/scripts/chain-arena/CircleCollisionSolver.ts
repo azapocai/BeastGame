@@ -19,6 +19,8 @@ export class CircleCollisionSolver {
     obstacle: MovableCircle,
     restitution = 0,
     fallbackNormal = { x: 1, y: 0 },
+    output?: CircleCollisionResult,
+    separationScale = 1,
   ): CircleCollisionResult | null {
     const dx = movable.x - obstacle.x;
     const dy = movable.y - obstacle.y;
@@ -34,8 +36,9 @@ export class CircleCollisionSolver {
       ? dy / distance
       : fallbackLength > 0.001 ? fallbackNormal.y / fallbackLength : 0;
     const penetration = minimum - distance;
-    movable.x += normalX * penetration;
-    movable.y += normalY * penetration;
+    const appliedPenetration = penetration * Math.max(0, Math.min(1, separationScale));
+    movable.x += normalX * appliedPenetration;
+    movable.y += normalY * appliedPenetration;
 
     if (movable.vx !== undefined && movable.vy !== undefined) {
       const inwardSpeed = movable.vx * normalX + movable.vy * normalY;
@@ -44,7 +47,11 @@ export class CircleCollisionSolver {
         movable.vy -= normalY * inwardSpeed * (1 + restitution);
       }
     }
-    return { normalX, normalY, penetration };
+    const result = output || { normalX: 0, normalY: 0, penetration: 0 };
+    result.normalX = normalX;
+    result.normalY = normalY;
+    result.penetration = penetration;
+    return result;
   }
 
   /** Symmetric separation for peers such as two ordinary enemies. */
@@ -52,6 +59,8 @@ export class CircleCollisionSolver {
     first: MovableCircle,
     second: MovableCircle,
     fallbackNormal = { x: 1, y: 0 },
+    separationScale = 1,
+    output?: CircleCollisionResult,
   ): CircleCollisionResult | null {
     const dx = first.x - second.x;
     const dy = first.y - second.y;
@@ -67,11 +76,15 @@ export class CircleCollisionSolver {
       ? dy / distance
       : fallbackLength > 0.001 ? fallbackNormal.y / fallbackLength : 0;
     const penetration = minimum - distance;
-    const correction = penetration * 0.5;
+    const correction = penetration * 0.5 * Math.max(0, Math.min(1, separationScale));
     first.x += normalX * correction;
     first.y += normalY * correction;
     second.x -= normalX * correction;
     second.y -= normalY * correction;
-    return { normalX, normalY, penetration };
+    const result = output || { normalX: 0, normalY: 0, penetration: 0 };
+    result.normalX = normalX;
+    result.normalY = normalY;
+    result.penetration = penetration;
+    return result;
   }
 }

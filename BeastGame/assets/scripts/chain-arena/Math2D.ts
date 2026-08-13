@@ -8,9 +8,11 @@ export const Math2D = {
     return Math.max(min, Math.min(max, value));
   },
 
-  normalize(x: number, y: number): Point2D {
+  normalize(x: number, y: number, output: Point2D = { x: 0, y: 0 }): Point2D {
     const length = Math.hypot(x, y);
-    return length > 0.0001 ? { x: x / length, y: y / length } : { x: 0, y: 0 };
+    output.x = length > 0.0001 ? x / length : 0;
+    output.y = length > 0.0001 ? y / length : 0;
+    return output;
   },
 
   dot(ax: number, ay: number, bx: number, by: number): number {
